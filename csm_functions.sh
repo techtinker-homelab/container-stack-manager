@@ -2,12 +2,37 @@
 # Container Stack Manager - Core Functions and Stack Operations
 # Combined from core.sh and stack.sh
 
+set -u
+
 # Set secure umask (007: rwxrwx--- for dirs, rw-rw---- for files)
 umask 0007
 
 # ============================================
 # 1. CORE UTILITIES AND CONFIGURATION
 # ============================================
+
+# Default configuration values
+declare -A CONFIG_DEFAULTS=(
+    [container_runtime]="podman"
+    [CSM_ROOT]="/srv/csm"
+    [BACKUP_DIR]="${CSM_ROOT}/backup"
+    [COMMON_DIR]="${CSM_ROOT}/common"
+    [STACKS_DIR]="${CSM_ROOT}/stacks"
+    [CONFIGS_DIR]="${CSM_COMMON}/configs"
+    [SECRETS_DIR]="${CSM_COMMON}/secrets"
+    [TEMPLATES_DIR]="${CSM_COMMON}/templates"
+    [TEMPLATE_BRANCH]="main"
+    [TEMPLATE_REPO]="https://www.gitlab.com/techtinker/stack_templates"
+    [BACKUP_MAX_AGE]="30"
+    [BACKUP_COMPRESSION]="zip"
+    [NETWORK_NAME]="csm_network"
+    [NETWORK_SUBNET]="172.20.0.0/16"
+    [VOLUME_DRIVER]="local"
+    [VOLUME_LABEL]="csm.volume"
+    [UPDATE_CHECK_INTERVAL]="7"
+    [UPDATE_SOURCE]="github"
+    [UPDATE_BRANCH]="main"
+)
 
 # Define color codes
 declare -xr RED; RED="$(printf '\033[38;2;255;000;000m')"
@@ -70,6 +95,60 @@ log() {
 
     if [[ ${LOG_LEVELS[$level]} -le $log_level ]]; then
         $msg_func "$message"
+    fi
+}
+
+# os detection and nixos hybrid state validation
+validate_hybrid_host() {
+    local os_id="unknown"
+
+    # securely source os-release without executing arbitrary code
+    if [[ -f /etc/os-release ]]; then
+        os_id=$(grep -E '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
+    fi
+
+    if [[ "$os_id" == "nixos" ]]; then
+        log info "nixos detected. verifying hybrid environment state..."
+
+        local missing_deps=0
+
+        # check for container runtime and compose plugin
+        if ! command -v docker >/dev/null 2>&1; then
+            log error "docker daemon is not installed in the system profile."
+            missing_deps=1
+        fi
+
+        if ! command -v docker-compose >/dev/null 2>&1 && ! docker compose version >/dev/null 2>&1; then
+            log error "docker-compose plugin is missing from system packages."
+            missing_deps=1
+        fi
+
+        # check if systemd created the mutable state directories
+        if [[ ! -d "${csm_root:-/srv/csm}" ]]; then
+            log error "mutable state directory ${csm_root:-/srv/csm} does not exist."
+            missing_deps=1
+        fi
+
+        # if state is invalid, provide the declarative solution and exit
+        if [[ "$missing_deps" -eq 1 ]]; then
+            log warn "the nixos hybrid environment is not fully declared."
+            echo -e "${c_cyn}please ensure your configuration.nix includes the following module:${c_rst}"
+
+            cat << 'EOF'
+# --- csm hybrid docker module ---
+virtualisation.docker.enable = true;
+environment.systemPackages = with pkgs; [ docker-compose curl git gawk ];
+systemd.tmpfiles.rules = [
+  "d /srv/csm 0770 root docker -"
+  "d /srv/csm/stacks 0770 root docker -"
+];
+# --------------------------------
+EOF
+            log error "apply the configuration with 'sudo nixos-rebuild switch' and run csm again."
+            exit 1
+        fi
+
+        log success "nixos hybrid environment is fully functional."
     fi
 }
 
@@ -499,89 +578,40 @@ fix_permissions() {
 # 3. CONFIGURATION MANAGEMENT
 # ============================================
 
-# Default configuration values
-declare -A CONFIG_DEFAULTS=(
-    [container_runtime]="podman"
-    [CSM_ROOT]="/srv/csm"
-    [BACKUP_DIR]="${CSM_ROOT}/backup"
-    [COMMON_DIR]="${CSM_ROOT}/common"
-    [STACKS_DIR]="${CSM_ROOT}/stacks"
-    [CONFIGS_DIR]="${CSM_COMMON}/configs"
-    [SECRETS_DIR]="${CSM_COMMON}/secrets"
-    [TEMPLATES_DIR]="${CSM_COMMON}/templates"
-    [TEMPLATE_BRANCH]="main"
-    [TEMPLATE_REPO]="https://www.gitlab.com/techtinker/stack_templates"
-    [BACKUP_MAX_AGE]="30"
-    [BACKUP_COMPRESSION]="zip"
-    [NETWORK_NAME]="csm_network"
-    [NETWORK_SUBNET]="172.20.0.0/16"
-    [VOLUME_DRIVER]="local"
-    [VOLUME_LABEL]="csm.volume"
-    [UPDATE_CHECK_INTERVAL]="7"
-    [UPDATE_SOURCE]="github"
-    [UPDATE_BRANCH]="main"
-)
-
 # Load configuration from files and environment
 load_config() {
     local config_files=(
-        "${CSM_ROOT}/csm.conf"
+        "${csm_root}/csm.conf"
         "/etc/csm/csm.conf"
         "${HOME}/.config/csm/config"
         "${PWD}/.csm/config"
     )
 
-    # Set default values first
-    for key in "${!CONFIG_DEFAULTS[@]}"; do
-        export "$key"="${CONFIG_DEFAULTS[$key]}"
+    # set default values first
+    for key in "${!config_defaults[@]}"; do
+        export "$key"="${config_defaults[$key]}"
     done
 
-    # Load from files in order of increasing precedence
+    # load from files in order of increasing precedence
     for file in "${config_files[@]}"; do
         if [[ -f "$file" ]]; then
-            log DEBUG "Loading config from $file"
+            log info "loading config from $file"
             # shellcheck source=/dev/null
             source "$file"
         fi
     done
 
-    # Apply environment variable overrides (CSM_*)
+    # apply environment variable overrides (csm_*)
     while IFS='=' read -r -d '' key value; do
-        if [[ "$key" == CSM_* ]]; then
-            local config_key="${key#CSM_}"
-            if [[ -n "${CONFIG_DEFAULTS[$config_key]+x}" ]]; then
+        if [[ "$key" == csm_* ]]; then
+            local config_key="${key#csm_}"
+            if [[ -n "${config_defaults[$config_key]+x}" ]]; then
                 export "$config_key"="$value"
             else
-                log WARN "Unknown config key in environment: $key"
+                log warn "unknown config key in environment: $key"
             fi
         fi
     done < <(env -0 2>/dev/null || env)
-
-    # Ensure dependent paths are set correctly by comparing to user/project/base configs in that order
-    if [[ -r "${HOME}/.config/csm/config" ]]; then
-        log DEBUG "Loading config from ${HOME}/.config/csm/config"
-        # shellcheck source=/dev/null
-        source "${HOME}/.config/csm/config"
-    elif [[ -r "${CSM_ROOT}/common/user.conf" ]]; then
-        log DEBUG "Loading config from ${CSM_ROOT}/common/user.conf"
-        # shellcheck source=/dev/null
-        source "${CSM_ROOT}/common/user.conf"
-    elif [[ -r "${PWD}/.csm/config" ]]; then
-        log DEBUG "Loading config from ${PWD}/.csm/config"
-        # shellcheck source=/dev/null
-        source "${PWD}/.csm/config"
-    elif [[ -r "${CSM_ROOT}/common/default.conf" ]]; then
-        log DEBUG "Loading config from ${CSM_ROOT}/common/default.conf"
-        # shellcheck source=/dev/null
-        source "${CSM_ROOT}/common/default.conf"
-    elif [[ -r "/etc/csm/csm.conf" ]]; then
-        log DEBUG "Loading config from /etc/csm/csm.conf"
-        # shellcheck source=/dev/null
-        source "/etc/csm/csm.conf"
-    else
-        log ERROR "No configuration file found in:\n${CSM_ROOT}/common\n${HOME}/.config/csm\n${PWD}/.csm\n/etc/csm"
-        exit 1
-    fi
 }
 
 # Validate the current configuration
@@ -1402,30 +1432,34 @@ remove_stack() {
 }
 
 delete_stack() {
-    local stack_name="$1"
-    local mode="$2"
+    # parameter expansion enforces required variables, preventing unbound variable errors
+    local stack_name="${1:?error: stack name is required}"
+    local mode="${2:?error: mode is required}"
 
-    if [[ -z "$stack_name" || -z "$mode" ]]; then
-        log ERROR "Stack name and mode are required"
-        return 1
-    fi
-
-    local stack_dir="${STACKS_PATH}/${mode}/${stack_name}"
+    # defensively construct the path, ensuring base directory variables are defined
+    local base_dir="${csm_stacks:?error: csm_stacks is not defined}"
+    local stack_dir="${base_dir}/${mode}/${stack_name}"
 
     if [[ ! -d "$stack_dir" ]]; then
-        log ERROR "Stack '$stack_name' does not exist in mode '$mode'"
+        log error "stack '$stack_name' does not exist in mode '$mode'"
         return 1
     fi
 
-    log WARN "This will permanently delete stack '$stack_name' and all its data"
-    read -p -r "Are you sure? (y/N): " confirm
+    # secondary safety check to prevent accidental root or base directory deletion
+    if [[ "$stack_dir" == "/" || "$stack_dir" == "$base_dir" || "$stack_dir" == "${base_dir}/${mode}" ]]; then
+        log error "safety trigger: invalid stack directory path calculated: $stack_dir"
+        return 1
+    fi
+
+    log warn "this will permanently delete stack '$stack_name' and all its data"
+    read -p -r "are you sure? (y/N): " confirm
 
     if [[ "${confirm,,}" != "y" ]]; then
-        log INFO "Operation cancelled"
+        log info "operation cancelled"
         return 1
     fi
 
-    log INFO "Deleting stack '$stack_name'..."
+    log info "deleting stack '$stack_name'..."
     rm -rf "$stack_dir"
 }
 
