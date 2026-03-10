@@ -5,10 +5,60 @@
 # Date: 2025-06-10
 # License: MIT
 
+# ============================================
+# CONFIGURATION
+# ============================================
+
+# Git project file structure pre-installation:
+# ./$SCRIPT_DIR/
+# ├── default.conf
+# ├── example.env
+# ├── csm
+# ├── csm_functions.sh
+# └── csm_installer.sh
+
+# File-structure post-installation:
+# /srv/stacks/
+# ├── .backup/
+# │  └── <stackname>/
+# │     └── <stackname>-yymmdd-hhmm.tar.gz
+# ├── .common/
+# │  ├── configs/
+# │  │  ├── default.conf
+# │  │  └── user.conf
+# │  ├── csm
+# │  ├── csm_functions.sh
+# │  ├── example.env
+# │  └── secrets/
+# │     └── <secretname>.secret
+# ├── <stackname>/
+# |  ├── .env
+# |  ├── compose.yml
+# |  └── appdata/
+# └── .../
+
 set -euo pipefail
 
-# 1. Define script directory immediately for reliable relative sourcing
+# 1. Directory variables
 readonly script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+export CSM_ROOT_DIR="${CSM_ROOT_DIR:-/srv/stacks}"
+csm_backup="${CSM_ROOT_DIR}/backup"
+csm_common="${CSM_ROOT_DIR}/common"
+csm_stacks="${CSM_ROOT_DIR}/stacks"
+csm_configs="${csm_common}/configs"
+csm_secrets="${csm_common}/secrets"
+
+readonly dir_mode="0770"
+readonly auth_mode="0600"
+readonly conf_mode="0660"
+
+declare -A files_to_install=(
+    ["${script_dir}/csm"]="${CSM_ROOT_DIR}/"
+    ["${script_dir}/csm_functions.sh"]="${csm_common}/"
+    ["${script_dir}/default.conf"]="${csm_configs}/"
+)
+
 
 # 2. Load configurations in order of precedence
 if [[ -f "${HOME}/.csm/config" ]]; then
