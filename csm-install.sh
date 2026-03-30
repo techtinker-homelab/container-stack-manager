@@ -23,22 +23,27 @@ readonly INSTALLER_VERSION="1.1.0"
 # 0. HELPERS
 # =============================================================================
 
-_safe_tput() { command -v tput >/dev/null 2>&1 && tput "$@" 2>/dev/null || true; }
+tput_safe() { command -v tput >/dev/null 2>&1 && tput "$@" 2>/dev/null || true; }
 
-_color_setup() {
+color_setup() {
     if [[ -t 1 ]]; then
-        red=$(_safe_tput setaf 1); grn=$(_safe_tput setaf 2)
-        ylw=$(_safe_tput setaf 3); blu=$(_safe_tput setaf 4)
-        prp=$(_safe_tput setaf 5); cyn=$(_safe_tput setaf 6)
-        wht=$(_safe_tput setaf 7); blk=$(_safe_tput setaf 0)
-        bld=$(_safe_tput bold);    uln=$(_safe_tput smul)
-        rst=$(_safe_tput sgr0)
+        red=$(tput_safe setaf 1)
+        grn=$(tput_safe setaf 2)
+        ylw=$(tput_safe setaf 3)
+        blu=$(tput_safe setaf 4)
+        prp=$(tput_safe setaf 5)
+        cyn=$(tput_safe setaf 6)
+        wht=$(tput_safe setaf 7)
+        blk=$(tput_safe setaf 0)
+        bld=$(tput_safe bold)
+        uln=$(tput_safe smul)
+        rst=$(tput_safe sgr0)
     else
-        red="" grn="" ylw="" blu="" prp="" cyn="" wht="" blk=""
-        bld="" uln="" rst=""
+        red="" grn="" ylw="" blu="" prp="" cyn=""
+        wht="" blk="" bld="" uln="" rst=""
     fi
 }
-_color_setup
+color_setup
 
 log() {
     local level="${1:-INFO}" message="${2:-}"
@@ -47,17 +52,23 @@ log() {
         WARN) printf "%s WARN  >> %s%s\n" "${ylw}${bld}" "${message}" "${rst}" >&2 ;;
         INFO) printf "%s INFO  >> %s%s\n" "${cyn}${bld}" "${message}" "${rst}" ;;
         PASS) printf "%s PASS  >> %s%s\n" "${grn}${bld}" "${message}" "${rst}" ;;
-        STEP) printf "%s ----  %s%s\n"    "${blu}${bld}" "${message}" "${rst}" ;;
+        STEP) printf "%s -- %s%s\n" "${blu}${bld}" "${message}" "${rst}" ;;
         *)    printf "%s DEBUG >> %s%s\n" "${blu}${bld}" "${message}" "${rst}" ;;
     esac
 }
 
 die()     { log FAIL "$1"; exit 1; }
 
-_confirm() {
+confirm_yes() {
     local prompt="${1:-Are you sure?}"
-    read -r -p "${ylw}${bld}  ${prompt} [y/N]: ${rst}" _reply
-    [[ "${_reply,,}" == "y" ]]
+    read -r -p "${ylw}${bld} ${prompt} [Y/n]: ${rst}" reply
+    [[ -z "${reply}" || "${reply,,}" == "y" ]]
+}
+
+confirm_no() {
+    local prompt="${1:-Are you sure?}"
+    read -r -p "${ylw}${bld}  ${prompt} [y/N]: ${rst}" reply
+    [[ "${reply,,}" == "y" ]]
 }
 
 # =============================================================================
@@ -109,7 +120,6 @@ readonly mode_auth="600"   # secrets:      rw-------
 # Files to install: source → destination directory
 declare -A files_to_install=(
     ["${script_dir}/csm.sh"]="${CSM_ROOT_DIR}/"
-    ["${script_dir}/csm_functions.sh"]="${csm_common}/"
     ["${script_dir}/csm-install.sh"]="${csm_common}/"
     ["${script_dir}/default.conf"]="${csm_configs}/"
 )
@@ -156,7 +166,7 @@ check_docker_service() {
         return 0
     fi
     log WARN "Docker service is not running."
-    _confirm "Start Docker now?" && {
+    confirm_yes "Start Docker now?" && {
         $var_sudo systemctl start docker
         systemctl is-active --quiet docker \
             && log PASS "Docker started." \
@@ -192,7 +202,7 @@ create_docker_user_group() {
     local current_user="${SUDO_USER:-$(id -un)}"
     if ! groups "$current_user" 2>/dev/null | grep -qw docker; then
         log WARN "User '$current_user' is not in the 'docker' group."
-        _confirm "Add '$current_user' to the 'docker' group?" && {
+        confirm_yes "Add '$current_user' to the 'docker' group?" && {
             $var_sudo usermod -aG docker "$current_user"
             log INFO "User added. Log out and back in for this to take effect."
         }
@@ -227,6 +237,7 @@ install_docker() {
 install_dir() {
     local tgt="$1" mode="$2"
     if [[ ! -d "$tgt" ]]; then
+        # run_cmd install -o "$dk_uid" -g "$dk_gid" -m 660 /dev/null "$stacks_dir${scope}/${stack}/compose.yml"
         $var_sudo install -d -m "$mode" "$tgt"
         log INFO "Created: $tgt"
     else
@@ -251,8 +262,12 @@ setup_directories() {
     install_dir "$csm_backup"   "$mode_dir"
     install_dir "$csm_common"   "$mode_dir"
     install_dir "$csm_stacks"   "$mode_dir"
-    install_dir "$csm_configs"  "$mode_conf"
-    install_dir "$csm_secrets"  "$mode_auth"
+    install_dir "$csm_configs"  "$mode_dir"
+    install_dir "$csm_secrets"  "$mode_dir"
+
+    [ "$(stat -c '%G' "$csm_stacks")" != "$csm_group" ] && $var_sudo chgrp "$csm_group" "$csm_stacks"
+    [ "$(stat -c "%A" "$csm_stacks" | cut -c6)" != "s" ] && $var_sudo chmod g+s "$csm_stacks"
+
 }
 
 setup_files() {
@@ -283,7 +298,7 @@ setup_symlinks() {
         current_target="$(readlink "$link_path")"
         if [[ "$current_target" != "$target_dir" ]]; then
             log WARN "Symlink $link_path points to $current_target (expected $target_dir)"
-            _confirm "Update symlink to point to $target_dir?" && {
+            confirm_no "Update symlink to point to $target_dir?" && {
                 rm -f "$link_path"
                 ln -s "$target_dir" "$link_path"
                 log INFO "Symlink updated."
@@ -327,9 +342,9 @@ main() {
     log INFO "Invoking user: ${csm_owner} (UID ${csm_uid})"
 
     detect_pkg_manager
-    check_docker_service
     create_docker_user_group
     install_docker
+    check_docker_service
     setup_directories
     setup_files
     setup_symlinks
