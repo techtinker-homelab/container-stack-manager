@@ -125,6 +125,44 @@ detect_compose_command() {
     fi
 }
 
+detect_scope() {
+    local stack_name="$1"
+    local stack_dir; stack_dir="$(get_stack_dir "$stack_name")"
+    local f; f="${stack_dir}/compose.yml"
+
+    # Podman has no swarm — always local
+    [[ "$csm_cmd" == "podman" ]] && { scope="local"; return; }
+
+    # Explicit marker files still override auto-detect
+    [[ -f "${stack_dir}/.swarm" ]] && { scope="swarm"; return; }
+    [[ -f "${stack_dir}/.local" ]] && { scope="local"; return; }
+
+    # Is Swarm active on this node?
+    local swarm_state
+    swarm_state="$(docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || echo "inactive")"
+    [[ "$swarm_state" != "active" ]] && { scope="local"; return; }
+
+    # Swarm is active — is this stack already deployed to it?
+    if docker stack ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qw "$stack_name"; then
+        scope="swarm"
+        return
+    fi
+
+    # Not deployed yet — check compose file for swarm-specific syntax
+    if [[ -f "$f" ]]; then
+        # Swarm indicators: deploy.mode (global/replicated), endpoint_mode, or placement constraints
+        if grep -qE '^\s+mode:\s+(global|replicated)' "$f" 2>/dev/null \
+            || grep -qE '^\s+endpoint_mode:' "$f" 2>/dev/null \
+            || grep -qE '^\s+placement:' "$f" 2>/dev/null; then
+            scope="swarm"
+            return
+        fi
+    fi
+
+    # Default to local
+    scope="local"
+}
+
 load_config() {
     # Ensure 'user.conf' is the last file sourced
     for f in \
@@ -208,8 +246,18 @@ del_safe() {
     [[ "$stack_dir" == "/" || "$stack_dir" == "$csm_dir" ]] && \
         die "Safety guard: refusing to delete $stack_dir"
 
-    # Attempt to stop containers, suppressing errors if it's already down or missing compose.yml
-    stack_stop "$stack_name" >/dev/null 2>&1 || true
+    # Detect scope and stop/remove containers accordingly
+    if [[ -f "${stack_dir}/compose.yml" ]]; then
+        detect_scope "$stack_name"
+        case "$scope" in
+            swarm)
+                docker stack rm "$stack_name" 2>/dev/null || true
+                ;;
+            local)
+                stack_stop "$stack_name" >/dev/null 2>&1 || true
+                ;;
+        esac
+    fi
 
     rm -rf "$stack_dir"
     log PASS "Stack '$stack_name' deleted."
@@ -282,14 +330,23 @@ stack_remove() {
     confirm_no "Remove stack '$stack_name'? (all running stack containers will be removed)" \
         || { log INFO "Cancelled."; return 0; }
 
-    local f; f="$(require_compose_file "$stack_name")"
-    local containers
-    containers=$($csm_cmd compose -f "$f" ps -q 2>/dev/null) || true
-    if [[ -n "$containers" ]]; then
-        $csm_cmd compose -f "$f" rm --stop --force
-        # $csm_cmd compose -f "$f" down --rmi none --volumes=false #needs testing
-    fi
-    log PASS "Stack '$stack_name' containers removed."
+    detect_scope "$stack_name"
+    case "$scope" in
+        swarm)
+            docker stack rm "$stack_name" \
+                && log PASS "Swarm stack '$stack_name' removed." \
+                || die "Failed to remove Swarm stack '$stack_name'."
+            ;;
+        local)
+            local f; f="$(require_compose_file "$stack_name")"
+            local containers
+            containers=$($csm_cmd compose -f "$f" ps -q 2>/dev/null) || true
+            if [[ -n "$containers" ]]; then
+                $csm_cmd compose -f "$f" rm --stop --force
+            fi
+            log PASS "Stack '$stack_name' containers removed."
+            ;;
+    esac
 }
 
 stack_delete() {
@@ -362,101 +419,134 @@ stack_purge() {
 stack_up() {
     local stack_name; stack_name="$(require_name "${1:-}")"
     local f; f="$(require_compose_file "$stack_name")"
-    local d; d="$(get_stack_dir "$stack_name")"
-
-    if [[ -f "${d}/.swarm" ]] && [[ "$csm_cmd" == "docker" ]]; then
-        docker stack deploy -c "$f" "$stack_name" \
-            && log PASS "Swarm stack '$stack_name' deployed." \
-            || die "Failed to deploy Swarm stack '$stack_name'."
-    else
-        $csm_cmd compose -f "$f" up -d --remove-orphans \
-            && log PASS "Stack '$stack_name' is up." \
-            || die "Failed to bring up stack '$stack_name'."
-    fi
+    detect_scope "$stack_name"
+    case "$scope" in
+        swarm)
+            docker stack deploy -c "$f" "$stack_name" \
+                && log PASS "Swarm stack '$stack_name' deployed." \
+                || die "Failed to deploy Swarm stack '$stack_name'."
+            ;;
+        local)
+            $csm_cmd compose -f "$f" up -d --remove-orphans \
+                && log PASS "Stack '$stack_name' is up." \
+                || die "Failed to bring up stack '$stack_name'."
+            ;;
+    esac
 }
 
 stack_down() {
     local stack_name; stack_name="$(require_name "${1:-}")"
     local f; f="$(require_compose_file "$stack_name")"
-    local d; d="$(get_stack_dir "$stack_name")"
-
-    if [[ -f "${d}/.swarm" ]] && [[ "$csm_cmd" == "docker" ]]; then
-        docker stack rm "$stack_name" \
-            && log PASS "Swarm stack '$stack_name' brought down (removed)." \
-            || die "Failed to bring down Swarm stack '$stack_name'."
-    else
-        $csm_cmd compose -f "$f" down \
-            && log PASS "Stack '$stack_name' brought down." \
-            || die "Failed to bring down stack '$stack_name'."
-    fi
+    detect_scope "$stack_name"
+    case "$scope" in
+        swarm)
+            docker stack rm "$stack_name" \
+                && log PASS "Swarm stack '$stack_name' brought down (removed)." \
+                || die "Failed to bring down Swarm stack '$stack_name'."
+            ;;
+        local)
+            $csm_cmd compose -f "$f" down \
+                && log PASS "Stack '$stack_name' brought down." \
+                || die "Failed to bring down stack '$stack_name'."
+            ;;
+    esac
 }
 
 stack_bounce() {
     local stack_name; stack_name="$(require_name "${1:-}")"
-    log INFO "Bouncing stack '$stack_name'..."
-    stack_down "$stack_name"
-    stack_up   "$stack_name"
+    local f; f="$(require_compose_file "$stack_name")"
+    detect_scope "$stack_name"
+    case "$scope" in
+        swarm)
+            log INFO "Re-deploying Swarm stack '$stack_name'..."
+            docker stack deploy -c "$f" "$stack_name" \
+                && log PASS "Swarm stack '$stack_name' re-deployed." \
+                || die "Failed to re-deploy Swarm stack '$stack_name'."
+            ;;
+        local)
+            log INFO "Bouncing stack '$stack_name'..."
+            stack_down "$stack_name"
+            stack_up   "$stack_name"
+            ;;
+    esac
 }
 
 stack_start() {
     local stack_name; stack_name="$(require_name "${1:-}")"
     local f; f="$(require_compose_file "$stack_name")"
-    local d; d="$(get_stack_dir "$stack_name")"
-
-    if [[ -f "${d}/.swarm" ]] && [[ "$csm_cmd" == "docker" ]]; then
-        log WARN "Swarm does not support 'start' without redeployment. Running full deploy."
-        docker stack deploy -c "$f" "$stack_name" \
-            && log PASS "Swarm stack '$stack_name' deployed." \
-            || die "Failed to deploy Swarm stack '$stack_name'."
-    else
-        $csm_cmd compose -f "$f" start \
-            && log PASS "Stack '$stack_name' started." \
-            || die "Failed to start stack '$stack_name'."
-    fi
+    detect_scope "$stack_name"
+    case "$scope" in
+        swarm)
+            log WARN "Swarm does not support 'start' without redeployment. Running full deploy."
+            docker stack deploy -c "$f" "$stack_name" \
+                && log PASS "Swarm stack '$stack_name' deployed." \
+                || die "Failed to deploy Swarm stack '$stack_name'."
+            ;;
+        local)
+            $csm_cmd compose -f "$f" start \
+                && log PASS "Stack '$stack_name' started." \
+                || die "Failed to start stack '$stack_name'."
+            ;;
+    esac
 }
 
 stack_restart() {
     local stack_name; stack_name="$(require_name "${1:-}")"
     local f; f="$(require_compose_file "$stack_name")"
-    local d; d="$(get_stack_dir "$stack_name")"
-
-    if [[ -f "${d}/.swarm" ]] && [[ "$csm_cmd" == "docker" ]]; then
-        log WARN "Swarm does not support 'restart' without redeployment. Running full deploy."
-        docker stack deploy -c "$f" "$stack_name" \
-            && log PASS "Swarm stack '$stack_name' deployed." \
-            || die "Failed to deploy Swarm stack '$stack_name'."
-    else
-        $csm_cmd compose -f "$f" restart \
-            && log PASS "Stack '$stack_name' restarted." \
-            || die "Failed to restart stack '$stack_name'."
-    fi
+    detect_scope "$stack_name"
+    case "$scope" in
+        swarm)
+            log WARN "Swarm does not support 'restart' without redeployment. Running full deploy."
+            docker stack deploy -c "$f" "$stack_name" \
+                && log PASS "Swarm stack '$stack_name' deployed." \
+                || die "Failed to deploy Swarm stack '$stack_name'."
+            ;;
+        local)
+            $csm_cmd compose -f "$f" restart \
+                && log PASS "Stack '$stack_name' restarted." \
+                || die "Failed to restart stack '$stack_name'."
+            ;;
+    esac
 }
 
 stack_stop() {
     local stack_name; stack_name="$(require_name "${1:-}")"
     local f; f="$(require_compose_file "$stack_name")"
-    local d; d="$(get_stack_dir "$stack_name")"
-
-    if [[ -f "${d}/.swarm" ]] && [[ "$csm_cmd" == "docker" ]]; then
-        log WARN "Swarm does not support 'stop' without removal. Executing full removal."
-        docker stack rm "$stack_name" \
-            && log PASS "Swarm stack '$stack_name' removed." \
-            || die "Failed to remove Swarm stack '$stack_name'."
-    else
-        $csm_cmd compose -f "$f" stop \
-            && log PASS "Stack '$stack_name' stopped." \
-            || die "Failed to stop stack '$stack_name'."
-    fi
+    detect_scope "$stack_name"
+    case "$scope" in
+        swarm)
+            log WARN "Swarm does not support 'stop' without removal. Executing full removal."
+            docker stack rm "$stack_name" \
+                && log PASS "Swarm stack '$stack_name' removed." \
+                || die "Failed to remove Swarm stack '$stack_name'."
+            ;;
+        local)
+            $csm_cmd compose -f "$f" stop \
+                && log PASS "Stack '$stack_name' stopped." \
+                || die "Failed to stop stack '$stack_name'."
+            ;;
+    esac
 }
 
 stack_update() {
     local stack_name; stack_name="$(require_name "${1:-}")"
     local f; f="$(require_compose_file "$stack_name")"
-    log INFO "Pulling latest images for '$stack_name'..."
-    $csm_cmd compose -f "$f" pull
-    $csm_cmd compose -f "$f" up -d \
-        && log PASS "Stack '$stack_name' updated." \
-        || die "Failed to update stack '$stack_name'."
+    detect_scope "$stack_name"
+    case "$scope" in
+        swarm)
+            log INFO "Pulling latest images for '$stack_name'..."
+            docker stack deploy -c "$f" "$stack_name" \
+                && log PASS "Swarm stack '$stack_name' updated (redeployed)." \
+                || die "Failed to update Swarm stack '$stack_name'."
+            ;;
+        local)
+            log INFO "Pulling latest images for '$stack_name'..."
+            $csm_cmd compose -f "$f" pull
+            $csm_cmd compose -f "$f" up -d \
+                && log PASS "Stack '$stack_name' updated." \
+                || die "Failed to update stack '$stack_name'."
+            ;;
+    esac
 }
 
 update_via_watchtower() {
@@ -478,6 +568,14 @@ update_via_watchtower() {
 stack_list() {
     [[ -d "$csm_dir" ]] || die "Stacks directory not found: $csm_dir"
 
+    # Check if swarm is active
+    local swarm_active=false
+    if [[ "$csm_cmd" == "docker" ]]; then
+        local swarm_state
+        swarm_state="$(docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || echo "inactive")"
+        [[ "$swarm_state" == "active" ]] && swarm_active=true
+    fi
+
     local -a valid_stacks=()
     local -a empty_dirs=()
 
@@ -491,23 +589,46 @@ stack_list() {
         fi
     done < <(find "$csm_dir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print0 | sort -z)
 
+    # Build set of deployed swarm stacks for quick lookup
+    local -a swarm_stacks=()
+    if $swarm_active; then
+        while IFS= read -r s; do
+            [[ -n "$s" ]] && swarm_stacks+=("$s")
+        done < <(docker stack ls 2>/dev/null | awk 'NR>1 {print $1}')
+    fi
+
     # Output Valid Stacks
     if [[ ${#valid_stacks[@]} -gt 0 ]]; then
         log INFO "Active stacks in ${csm_dir}:"
         for dir_name in "${valid_stacks[@]}"; do
             local stack_dir="${csm_dir}/${dir_name}"
-            local status_color status_label
+            local status_color status_label scope_label
 
-            if $csm_cmd compose -f "${stack_dir}/compose.yml" ps --services \
+            # Check if deployed to swarm
+            local is_swarm=false
+            if $swarm_active; then
+                for s in "${swarm_stacks[@]}"; do
+                    [[ "$s" == "$dir_name" ]] && { is_swarm=true; break; }
+                done
+            fi
+
+            if $is_swarm; then
+                scope_label="swarm"
+                status_color="${grn}"
+                status_label="deployed"
+            elif $csm_cmd compose -f "${stack_dir}/compose.yml" ps --services \
                 --filter status=running 2>/dev/null | grep -q .; then
+                scope_label="compose"
                 status_color="${grn}"; status_label="running"
             else
+                scope_label="compose"
                 status_color="${ylw}"; status_label="stopped"
             fi
 
-            printf "  %s%-24s%s [%s%s%s]\n" \
+            printf "  %s%-24s%s [%s%s%s] %s%s%s\n" \
                 "${cyn}" "$dir_name" "${rst}" \
-                "${status_color}" "$status_label" "${rst}"
+                "${status_color}" "$status_label" "${rst}" \
+                "${blu}" "$scope_label" "${rst}"
         done
     else
         log WARN "No valid stacks found in $csm_dir"
@@ -526,8 +647,16 @@ stack_list() {
 }
 
 stack_ps() {
-    # Formatted, colorized container list sourced directly from docker/podman
-    local engine; engine="${csm_cmd%% *}"   # "docker" or "podman"
+    local engine; engine="${csm_cmd%% *}"
+
+    # Check if swarm is active
+    local swarm_active=false
+    if [[ "$engine" == "docker" ]]; then
+        local swarm_state
+        swarm_state="$(docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || echo "inactive")"
+        [[ "$swarm_state" == "active" ]] && swarm_active=true
+    fi
+
     {
         printf "%sCONTAINER ID  NAME  STATUS  PORTS%s\n" "${bld}" "${rst}"
         $csm_cmd ps --all --format "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}" | \
@@ -545,42 +674,84 @@ stack_ps() {
         s/\bhealthy\b/${grn}&${rst}/g
         s/([0-9]+\/[a-z]+)/${blu}\1${rst}/g
     "
+
+    # Show swarm services if active
+    if $swarm_active; then
+        local services
+        services="$(docker stack ls 2>/dev/null | awk 'NR>1 {print $1}')"
+        if [[ -n "$services" ]]; then
+            echo ""
+            log INFO "Swarm services:"
+            while IFS= read -r svc; do
+                printf "  %s%s%s\n" "${cyn}" "$svc" "${rst}"
+                docker service ps "$svc" --no-trunc --format "table {{.Name}}\t{{.CurrentState}}\t{{.Node}}\t{{.DesiredState}}" 2>/dev/null | \
+                    tail -n +2 | sed 's/^/    /'
+            done <<< "$services"
+        fi
+    fi
 }
 
 stack_status() {
     local stack_name; stack_name="$(require_name "${1:-}")"
     local f; f="$(require_compose_file "$stack_name")"
-    $csm_cmd compose -f "$f" ps
+    detect_scope "$stack_name"
+    case "$scope" in
+        swarm)
+            docker service ps "$stack_name"
+            ;;
+        local)
+            $csm_cmd compose -f "$f" ps
+            ;;
+    esac
 }
 
 stack_validate() {
     local stack_name; stack_name="$(require_name "${1:-}")"
     local f; f="$(require_compose_file "$stack_name")"
-    if $csm_cmd compose -f "$f" config -q 2>&1; then
-        log PASS "Config valid: $f"
-    else
-        die "Config invalid: $f"
-    fi
+    detect_scope "$stack_name"
+    case "$scope" in
+        swarm)
+            log INFO "Swarm does not support config validation without deployment."
+            ;;
+        local)
+            if $csm_cmd compose -f "$f" config -q 2>&1; then
+                log PASS "Config valid: $f"
+            else
+                die "Config invalid: $f"
+            fi
+            ;;
+    esac
 }
 
 stack_inspect() {
     local stack_name; stack_name="$(require_name "${1:-}")"
     local f; f="$(require_compose_file "$stack_name")"
-    log INFO "Inspecting stack '$stack_name'..."
-    $csm_cmd compose -f "$f" config
+    detect_scope "$stack_name"
+    case "$scope" in
+        swarm)
+            log INFO "Inspecting Swarm stack '$stack_name'..."
+            docker stack ps "$stack_name"
+            ;;
+        local)
+            log INFO "Inspecting stack '$stack_name'..."
+            $csm_cmd compose -f "$f" config
+            ;;
+    esac
 }
 
 stack_logs() {
     local stack_name; stack_name="$(require_name "${1:-}")"
     local f; f="$(require_compose_file "$stack_name")"
     local lines="${2:-50}"
-    $csm_cmd compose -f "$f" logs -f --tail="$lines"
-
-# docker service logs --tail 50 traefik_app
-# docker service logs --tail 100 -f traefik_app
-# docker service logs --timestamps -f traefik_app
-# docker service logs --since 10m traefik_app
-
+    detect_scope "$stack_name"
+    case "$scope" in
+        swarm)
+            docker service logs --tail "$lines" -f "$stack_name"
+            ;;
+        local)
+            $csm_cmd compose -f "$f" logs -f --tail="$lines"
+            ;;
+    esac
 }
 
 stack_cd() {
