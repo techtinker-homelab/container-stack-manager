@@ -41,6 +41,12 @@ readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && p
 
 csm_cmd=""    # set by detect_compose_command
 
+# Permission modes (symbolic form — compatible with GNU and BSD install)
+readonly mode_dirs="775"    # directories: rwxrwxr-x
+readonly mode_exec="770"   # executables: rwxrwx---
+readonly mode_conf="660"   # config files: rw-rw----
+readonly mode_auth="600"   # secrets:      rw-------
+
 # =============================================================================
 # 1. HELPER FUNCTIONS
 # =============================================================================
@@ -88,6 +94,7 @@ log() {
         *)    printf "%s STEP >> %s%s\n" "${blu}${bld}" "${message}" "${rst}" ;;
     esac
 }
+
 die() { log FAIL "$1"; exit 1; }
 
 confirm_no() {
@@ -105,6 +112,18 @@ confirm_yes() {
 # =============================================================================
 # 2. CONFIGURATION
 # =============================================================================
+
+detect_compose_command() {
+    if docker compose version >/dev/null 2>&1; then
+        csm_cmd="docker"
+    elif podman compose version >/dev/null 2>&1; then
+        csm_cmd="podman"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        die "'docker-compose' v1 is unsupported. Upgrade to 'docker compose' (v2)."
+    else
+        die "No supported container runtime found. Install Docker or Podman."
+    fi
+}
 
 load_config() {
     # Ensure 'user.conf' is the last file sourced
@@ -137,21 +156,25 @@ validate_config() {
     return $errors
 }
 
-detect_compose_command() {
-    if docker compose version >/dev/null 2>&1; then
-        csm_cmd="docker"
-    elif podman compose version >/dev/null 2>&1; then
-        csm_cmd="podman"
-    elif command -v docker-compose >/dev/null 2>&1; then
-        die "'docker-compose' v1 is unsupported. Upgrade to 'docker compose' (v2)."
-    else
-        die "No supported container runtime found. Install Docker or Podman."
+validate_permissions() {
+    local stack_name; stack_name="$(require_name "${1:-}")"
+    local stack_dir; stack_dir="$(get_stack_dir "$stack_name")"
+    [[ -d "$stack_dir" ]] || return 0
+    local perm
+    perm=$(stat -c '%a' "$stack_dir" 2>/dev/null || stat -f '%Lp' "$stack_dir")
+    if [[ "$perm" != "770" ]]; then
+        log WARN "Incorrect permissions on $stack_dir (got $perm, expected 770)"
+        log WARN "Fix manually: chmod 770 \"$stack_dir\" && find \"$stack_dir\" -type f -exec chmod 660 {} \\;"
     fi
 }
 
 # =============================================================================
 # 3. INTERNAL HELPERS
 # =============================================================================
+
+container_exists() {
+    $csm_cmd inspect "$1" >/dev/null 2>&1
+}
 
 require_name() {
     [[ -n "${1:-}" ]] || die "Stack name is required."
@@ -173,8 +196,8 @@ require_compose_file() {
 fix_permissions() {
     local stack_name; stack_name="$(require_name "${1:-}")"
     local stack_dir; stack_dir="$(get_stack_dir "$stack_name")"
-    $var_sudo find $stack_dir -type f -exec chmod 660 {} \;
-    $var_sudo find $stack_dir -type d -exec chmod 770 {} \;
+    find "$stack_dir" -type f -exec chmod 660 {} \;
+    find "$stack_dir" -type d -exec chmod 770 {} \;
 }
 
 del_safe() {
@@ -204,6 +227,7 @@ stack_create() {
     [[ -d "$stack_dir" ]] && die "Stack '$stack_name' already exists at $stack_dir"
 
     mkdir -p "${stack_dir}/appdata"
+    install -o "$csm_uid" -g "$csm_gid" -m "$mode_dirs" -d "$stack_dir"
     cat > "${stack_dir}/compose.yml" <<EOF
 networks:
   default:
@@ -351,6 +375,29 @@ stack_up() {
     fi
 }
 
+stack_down() {
+    local stack_name; stack_name="$(require_name "${1:-}")"
+    local f; f="$(require_compose_file "$stack_name")"
+    local d; d="$(get_stack_dir "$stack_name")"
+
+    if [[ -f "${d}/.swarm" ]] && [[ "$csm_cmd" == "docker" ]]; then
+        docker stack rm "$stack_name" \
+            && log PASS "Swarm stack '$stack_name' brought down (removed)." \
+            || die "Failed to bring down Swarm stack '$stack_name'."
+    else
+        $csm_cmd compose -f "$f" down \
+            && log PASS "Stack '$stack_name' brought down." \
+            || die "Failed to bring down stack '$stack_name'."
+    fi
+}
+
+stack_bounce() {
+    local stack_name; stack_name="$(require_name "${1:-}")"
+    log INFO "Bouncing stack '$stack_name'..."
+    stack_down "$stack_name"
+    stack_up   "$stack_name"
+}
+
 stack_start() {
     local stack_name; stack_name="$(require_name "${1:-}")"
     local f; f="$(require_compose_file "$stack_name")"
@@ -402,37 +449,6 @@ stack_stop() {
     fi
 }
 
-stack_down() {
-    local stack_name; stack_name="$(require_name "${1:-}")"
-    local f; f="$(require_compose_file "$stack_name")"
-    local d; d="$(get_stack_dir "$stack_name")"
-
-    if [[ -f "${d}/.swarm" ]] && [[ "$csm_cmd" == "docker" ]]; then
-        docker stack rm "$stack_name" \
-            && log PASS "Swarm stack '$stack_name' brought down (removed)." \
-            || die "Failed to bring down Swarm stack '$stack_name'."
-    else
-        $csm_cmd compose -f "$f" down \
-            && log PASS "Stack '$stack_name' brought down." \
-            || die "Failed to bring down stack '$stack_name'."
-    fi
-}
-
-stack_restart() {
-    local stack_name; stack_name="$(require_name "${1:-}")"
-    local f; f="$(require_compose_file "$stack_name")"
-    log INFO "Restarting stack '$stack_name'..."
-    $csm_cmd compose -f "$f" restart \
-        && log PASS "Stack '$stack_name' restarted."
-}
-
-stack_bounce() {
-    local stack_name; stack_name="$(require_name "${1:-}")"
-    log INFO "Bouncing stack '$stack_name'..."
-    stack_stop "$stack_name"
-    stack_start   "$stack_name"
-}
-
 stack_update() {
     local stack_name; stack_name="$(require_name "${1:-}")"
     local f; f="$(require_compose_file "$stack_name")"
@@ -445,7 +461,7 @@ stack_update() {
 
 update_via_watchtower() {
     local ct_name; ct_name="$(require_name "${1:-}")"
-    local ct_exists; ct_exists="$(container_exists "$ct_name")"
+    container_exists "$ct_name" || die "Container '$ct_name' not found."
     log INFO "Updating container '$ct_name'..."
     $csm_cmd stop "$ct_name" \
         && $csm_cmd run --name "$ct_name-update" -v /var/run/docker.sock:/var/run/docker.sock containrrr/watchtower --run-once "$ct_name" \
@@ -559,6 +575,12 @@ stack_logs() {
     local f; f="$(require_compose_file "$stack_name")"
     local lines="${2:-50}"
     $csm_cmd compose -f "$f" logs -f --tail="$lines"
+
+# docker service logs --tail 50 traefik_app
+# docker service logs --tail 100 -f traefik_app
+# docker service logs --timestamps -f traefik_app
+# docker service logs --since 10m traefik_app
+
 }
 
 stack_cd() {
@@ -710,6 +732,11 @@ EOF
 # =============================================================================
 
 main() {
+
+    local cmd="${1:-}"
+    [[ -z "$cmd" ]] && { show_help; exit 0; }
+    shift || true
+
     case "$cmd" in
         -h|--help)    show_help; exit 0 ;;
         -v|--version) echo "CSM v${CSM_VERSION}"; exit 0 ;;
@@ -719,33 +746,31 @@ main() {
     validate_config || true
     detect_compose_command
 
-    local cmd="${1:-}"
-    [[ -z "$cmd" ]] && { show_help; exit 0; }
-    shift || true
-
     case "$cmd" in
-        c|create)       stack_create    "$@" ;;
-        m|modify)       stack_modify    "$@" ;;
-        bu|backup)      stack_backup    "$@" ;;
-        rm|remove)      stack_remove    "$@" ;;
-        dt|delete)      stack_delete    "$@" ;;
-        xx|purge)       stack_purge     "$@" ;;
-        u|up|start)     stack_start     "$@" ;;
-        d|dn|down|stop) stack_stop      "$@" ;;
-        b|bounce|)      stack_bounce    "$@" ;;
-        rc|recreate)    stack_recreate  "$@" ;;
-        rs|restart)     stack_restart   "$@" ;;
-        ud|update)      stack_update    "$@" ;;
-        i|inspect)      stack_inspect   "$@" ;;
-        l|ls|list)      stack_list           ;;
-        s|status)       stack_status    "$@" ;;
-        v|validate)     stack_validate  "$@" ;;
-        g|logs)         stack_logs      "$@" ;;
-        cd)             stack_cd        "$@" ;;
-        ps)             stack_ps             ;;
-        net)            net_info        "$@" ;;
-        g|cfg|config)   manage_configs  "$@" ;;
-        t|template)     manage_template "$@" ;;
+        c|create)       stack_create    "$@" ;; # create a new stack directory
+        m|modify)       stack_modify    "$@" ;; # open a stack compose.yml in editor
+        bu|backup)      stack_backup    "$@" ;; # create archive of stack folder
+        dt|delete)      stack_delete    "$@" ;; # delete stack folder
+        rm|remove)      stack_remove    "$@" ;; # container stop && container rm
+        xx|purge)       stack_purge     "$@" ;; # force stop and force delete all stack files and data
+        u|up)           stack_up        "$@" ;; # container up
+        d|dn|down)      stack_down      "$@" ;; # container down
+        b|bounce)       stack_bounce    "$@" ;; # container rm && container up
+        st|start)       stack_start     "$@" ;; # container start
+        sp|stop)        stack_stop      "$@" ;; # container stop
+        r|rs|restart)   stack_restart   "$@" ;; # container stop and start
+        rc|recreate)    stack_recreate  "$@" ;; # removes and recreates container folders
+        ud|update)      stack_update    "$@" ;; # update container image and restart
+        i|inspect)      stack_inspect   "$@" ;; # inspect container details
+        l|ls|list)      stack_list           ;; # list active or all containers
+        s|status)       stack_status    "$@" ;; # checks status of container/service
+        v|validate)     stack_validate  "$@" ;; # validate compose syntax
+        g|logs)         stack_logs      "$@" ;; # display container logs
+        cd)             stack_cd        "$@" ;; # go to stack directory
+        ps)             stack_ps             ;; # list stack containers
+        net)            net_info        "$@" ;; # list container networks
+        cfg|config)     manage_configs  "$@" ;; # check and edit config variables
+        t|template)     manage_template "$@" ;; # list/download/update local template
         *) log FAIL "Unknown command: '$cmd'"; show_help; exit 1 ;;
     esac
 }
