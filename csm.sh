@@ -299,6 +299,19 @@ EOF
 }
 
 stack_modify() {
+    local old_name; old_name="$(_require_name "${1:-}")"
+    local new_name; new_name="$(_require_name "${2:-}")"
+    local old_dir; old_dir="$(_get_stack_dir "$old_name")"
+    local new_dir; new_dir="$(_get_stack_dir "$new_name")"
+
+    [[ -d "$old_dir" ]] || _die "Stack '$old_name' not found at $old_dir"
+    [[ -d "$new_dir" ]] && _die "Stack '$new_name' already exists at $new_dir"
+
+    mv "$old_dir" "$new_dir"
+    _log PASS "Stack '$old_name' renamed to '$new_name'."
+}
+
+stack_edit() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local f; f="$(_require_compose_file "$stack_name")"
     "${EDITOR:-vi}" "$f"
@@ -851,14 +864,15 @@ ${bld}Usage:${rst} csm <command> [<stack-name>] [options]
 
 ${bld}Stack Lifecycle:${rst}
     c  | create   <n>           Create a new stack directory + compose scaffold
-    m  | modify   <n>           Open compose.yml in \$EDITOR
+    e  | edit     <n>           Open compose.yml in \$EDITOR
+    m  | modify   <old> <new>   Rename a stack directory
     rm | remove   <n>           Stop and remove containers in a stack (prompts)
     dt | delete   <n>           Stop and PERMANENTLY delete stack + all data (prompts)
     bu | backup   <n>           Tar-gz the stack directory to .backup/
     rc | recreate <n>           Delete and recreate a stack from scratch (prompts)
     xx | purge    [n...]        Purge stacks — WARNING THIS IS FINAL
 
-${bld}Stack Operations:${rst}
+${bld}Swarm Stack Operations:${rst}
     u  | up       <n>           Deploy a stack (up -d --remove-orphans)
     d  | down     <n>           Stop and remove containers (down)
     b  | bounce   <n>           Bring stack down then back up (full recreate)
@@ -911,6 +925,7 @@ main() {
 
     case "$cmd" in
         c|create)       stack_create    "$@" ;;
+        e|edit)         stack_edit      "$@" ;;
         m|modify)       stack_modify    "$@" ;;
         bu|backup)      stack_backup    "$@" ;;
         dt|delete)      stack_delete    "$@" ;;
@@ -921,7 +936,7 @@ main() {
         b|bounce)       stack_bounce    "$@" ;;
         st|start)       stack_start     "$@" ;;
         sp|stop)        stack_stop      "$@" ;;
-        rs|restart)     stack_restart   "$@" ;;
+        r|rs|restart)   stack_restart   "$@" ;;
         rc|recreate)    stack_recreate  "$@" ;;
         ud|update)      stack_update    "$@" ;;
         i|inspect)      stack_inspect   "$@" ;;
