@@ -128,7 +128,7 @@ declare -A files_to_install=(
     files_to_install["${script_dir}/example.env"]="${csm_common}/"
 
 # =============================================================================
-# 4. OS / PACKAGE-MANAGER DETECTION
+# 4. PLATFORM DETECTION
 # =============================================================================
 
 detect_pkg_manager() {
@@ -149,6 +149,16 @@ install_pkg() {
         dnf|yum) $var_sudo "$pkg_mgr" install -y "$@" ;;
         pacman)  $var_sudo pacman -S --noconfirm "$@" ;;
     esac
+}
+
+get_group() {
+    local file="$1"
+    stat -c '%G' "$file" 2>/dev/null || stat -f '%Sg' "$file"
+}
+
+get_perms() {
+    local file="$1"
+    stat -c '%A' "$file" 2>/dev/null || stat -f '%Sp' "$file"
 }
 
 # =============================================================================
@@ -203,7 +213,7 @@ create_docker_user_group() {
     if ! groups "$current_user" 2>/dev/null | grep -qw docker; then
         log WARN "User '$current_user' is not in the 'docker' group."
         confirm_yes "Add '$current_user' to the 'docker' group?" && {
-            $var_sudo usermod -aG docker "$current_user"
+            $var_sudo gpasswd -a "$current_user" "$csm_group"
             log INFO "User added. Log out and back in for this to take effect."
         }
     else
@@ -237,8 +247,7 @@ install_docker() {
 install_dir() {
     local tgt="$1" mode="$2"
     if [[ ! -d "$tgt" ]]; then
-        # run_cmd install -o "$dk_uid" -g "$dk_gid" -m 660 /dev/null "$stacks_dir${scope}/${stack}/compose.yml"
-        $var_sudo install -d -m "$mode" "$tgt"
+        $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -d "$tgt"
         log INFO "Created: $tgt"
     else
         log INFO "Exists:  $tgt"
@@ -249,7 +258,8 @@ install_dir() {
 install_file() {
     local src="$1" dest_dir="$2" mode="$3"
     if [[ -f "$src" ]]; then
-        $var_sudo install -m "$mode" "$src" "${dest_dir}/"
+        # run_cmd install -o "$csm_uid" -g "$csm_gid" -m "$mode" /dev/null "$stacks_dir${scope}/${stack}/compose.yml"
+        $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" "$src" "$dest_dir/"
         log INFO "Installed: $(basename "$src") → $dest_dir"
     else
         log WARN "Source file missing – skipping: $src"
@@ -264,10 +274,6 @@ setup_directories() {
     install_dir "$csm_stacks"   "$mode_dir"
     install_dir "$csm_configs"  "$mode_dir"
     install_dir "$csm_secrets"  "$mode_dir"
-
-    [ "$(stat -c '%G' "$csm_stacks")" != "$csm_group" ] && $var_sudo chgrp "$csm_group" "$csm_stacks"
-    [ "$(stat -c "%A" "$csm_stacks" | cut -c6)" != "s" ] && $var_sudo chmod g+s "$csm_stacks"
-
 }
 
 setup_files() {
@@ -327,9 +333,11 @@ setup_symlinks() {
 # =============================================================================
 
 set_ownership() {
-    log STEP "Setting ownership on ${CSM_ROOT_DIR}..."
-    $var_sudo chown -R "${csm_uid}:${csm_gid}" "$CSM_ROOT_DIR"
-    log INFO "Owner: ${csm_uid}:${csm_gid}"
+    log STEP "Setting group on ${CSM_ROOT_DIR} to ${csm_group}..."
+    [ "$(get_group "$CSM_ROOT_DIR")" != "$csm_group" ] && $var_sudo chgrp "$csm_group" "$CSM_ROOT_DIR"
+    [ "$(get_perms "$CSM_ROOT_DIR" | cut -c6)" != "s" ] && $var_sudo chmod g+s "$CSM_ROOT_DIR"
+    # $var_sudo chown -R "${csm_uid}:${csm_gid}" "$CSM_ROOT_DIR"
+    # log INFO "Owner: ${csm_uid}:${csm_gid}"
 }
 
 # =============================================================================
