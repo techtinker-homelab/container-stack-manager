@@ -89,15 +89,14 @@ _color_setup() {
 _log() {
     local level="${1:-INFO}" message="${2:-}"
     case "$level" in
-        FAIL) printf "%s FAIL >> %s%s\n" "${red}${bld}" "${message}" "${rst}" >&2 ;;
-        WARN) printf "%s WARN >> %s%s\n" "${ylw}${bld}" "${message}" "${rst}" >&2 ;;
         INFO) printf "%s INFO >> %s%s\n" "${cyn}${bld}" "${message}" "${rst}" ;;
         PASS) printf "%s PASS >> %s%s\n" "${grn}${bld}" "${message}" "${rst}" ;;
+        WARN) printf "%s WARN >> %s%s\n" "${ylw}${bld}" "${message}" "${rst}" >&2 ;;
+        FAIL) printf "%s FAIL >> %s%s\n" "${red}${bld}" "${message}" "${rst}" >&2 ;;
+        EXIT) printf "%s EXIT >> %s%s\n" "${red}${bld}" "${message}" "${rst}" >&2; exit 1 ;;
         *)    printf "%s STEP >> %s%s\n" "${blu}${bld}" "${message}" "${rst}" ;;
     esac
 }
-
-_die() { _log FAIL "$1"; exit 1; }
 
 _confirm_no() {
     local prompt="${1:-Are you sure?}"
@@ -121,13 +120,13 @@ _detect_command() {
     elif podman compose version >/dev/null 2>&1; then
         csm_cmd="podman"
     elif command -v docker-compose >/dev/null 2>&1; then
-        _die "'docker-compose' v1 is unsupported. Upgrade to 'docker compose' (v2)."
+        _log EXIT "'docker-compose' v1 is unsupported. Upgrade to 'docker compose' (v2)."
     else
-        _die "No supported container runtime found. Install Docker or Podman."
+        _log EXIT "No supported container runtime found. Install Docker or Podman."
     fi
 }
 
-_is_swarm_active() {
+_detect_swarm() {
     [[ "$csm_cmd" == "podman" ]] && return 1
     local state
     state="$(docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || echo "inactive")"
@@ -147,7 +146,7 @@ _detect_scope() {
     [[ -f "${stack_dir}/.local" ]] && { scope="local"; return; }
 
     # Swarm inactive — always local
-    _is_swarm_active || { scope="local"; return; }
+    _detect_swarm || { scope="local"; return; }
 
     # Swarm active — is this stack already deployed to it?
     if docker stack ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qw "$stack_name"; then
@@ -218,7 +217,7 @@ _validate_permissions() {
 # =============================================================================
 
 _require_name() {
-    [[ -n "${1:-}" ]] || _die "Stack name is required."
+    [[ -n "${1:-}" ]] || _log EXIT "Stack name is required."
     echo "$1"
 }
 
@@ -230,7 +229,7 @@ _get_stack_dir() {
 _require_compose_file() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local f="${csm_dir}/${stack_name}/compose.yml"
-    [[ -f "$f" ]] || _die "Compose file not found: $f"
+    [[ -f "$f" ]] || _log EXIT "Compose file not found: $f"
     echo "$f"
 }
 
@@ -247,7 +246,7 @@ _del_safe() {
 
     [[ -d "$stack_dir" ]] || return 0
     [[ "$stack_dir" == "/" || "$stack_dir" == "$csm_dir" ]] && \
-        _die "Safety guard: refusing to delete $stack_dir"
+        _log EXIT "Safety guard: refusing to delete $stack_dir"
 
     if [[ -f "${stack_dir}/compose.yml" ]]; then
         _detect_scope "$stack_name"
@@ -270,7 +269,7 @@ stack_create() {
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
     local env_file="${csm_common}/.docker.env"
 
-    [[ -d "$stack_dir" ]] && _die "Stack '$stack_name' already exists at $stack_dir"
+    [[ -d "$stack_dir" ]] && _log EXIT "Stack '$stack_name' already exists at $stack_dir"
 
     mkdir -p "${stack_dir}/appdata"
     install -o "$csm_uid" -g "$csm_gid" -m "$mode_dirs" -d "$stack_dir"
@@ -304,8 +303,8 @@ stack_modify() {
     local old_dir; old_dir="$(_get_stack_dir "$old_name")"
     local new_dir; new_dir="$(_get_stack_dir "$new_name")"
 
-    [[ -d "$old_dir" ]] || _die "Stack '$old_name' not found at $old_dir"
-    [[ -d "$new_dir" ]] && _die "Stack '$new_name' already exists at $new_dir"
+    [[ -d "$old_dir" ]] || _log EXIT "Stack '$old_name' not found at $old_dir"
+    [[ -d "$new_dir" ]] && _log EXIT "Stack '$new_name' already exists at $new_dir"
 
     mv "$old_dir" "$new_dir"
     _log PASS "Stack '$old_name' renamed to '$new_name'."
@@ -320,7 +319,7 @@ stack_edit() {
 stack_backup() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
-    [[ -d "$stack_dir" ]] || _die "Stack '$stack_name' not found."
+    [[ -d "$stack_dir" ]] || _log EXIT "Stack '$stack_name' not found."
 
     local ts backup_dir backup_file
     ts="$(date +%Y%m%d_%H%M%S)"
@@ -336,7 +335,7 @@ stack_backup() {
 stack_remove() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
-    [[ -d "$stack_dir" ]] || _die "Stack '$stack_name' not found at $stack_dir"
+    [[ -d "$stack_dir" ]] || _log EXIT "Stack '$stack_name' not found at $stack_dir"
 
     _confirm_no "Remove stack '$stack_name'? (all running stack containers will be removed)" \
         || { _log INFO "Cancelled."; return 0; }
@@ -347,7 +346,7 @@ stack_remove() {
         swarm)
             docker stack rm "$stack_name" \
                 && _log PASS "Swarm stack '$stack_name' removed." \
-                || _die "Failed to remove Swarm stack '$stack_name'."
+                || _log EXIT "Failed to remove Swarm stack '$stack_name'."
             ;;
         local)
             local containers
@@ -363,7 +362,7 @@ stack_remove() {
 stack_delete() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
-    [[ -d "$stack_dir" ]] || _die "Stack '$stack_name' not found at $stack_dir"
+    [[ -d "$stack_dir" ]] || _log EXIT "Stack '$stack_name' not found at $stack_dir"
 
     _log WARN "This will PERMANENTLY delete '$stack_name' and ALL associated appdata."
     _confirm_no "Confirm DELETE of $stack_dir?" || { _log INFO "Cancelled."; return 0; }
@@ -374,7 +373,7 @@ stack_delete() {
 stack_recreate() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
-    [[ -d "$stack_dir" ]] || _die "Stack '$stack_name' not found."
+    [[ -d "$stack_dir" ]] || _log EXIT "Stack '$stack_name' not found."
 
     _log WARN "This will destroy the current stack directory and create a fresh one."
     _confirm_no "Confirm RECREATE for '$stack_name'?" || { _log INFO "Cancelled."; return 0; }
@@ -431,12 +430,12 @@ stack_up() {
         swarm)
             docker stack deploy -c "$f" "$stack_name" \
                 && _log PASS "Swarm stack '$stack_name' deployed." \
-                || _die "Failed to deploy Swarm stack '$stack_name'."
+                || _log EXIT "Failed to deploy Swarm stack '$stack_name'."
             ;;
         local)
             $csm_cmd compose -f "$f" up -d --remove-orphans \
                 && _log PASS "Stack '$stack_name' is up." \
-                || _die "Failed to bring up Local stack '$stack_name'."
+                || _log EXIT "Failed to bring up Local stack '$stack_name'."
             ;;
     esac
 }
@@ -449,12 +448,12 @@ stack_down() {
         swarm)
             docker stack rm "$stack_name" \
                 && _log PASS "Swarm stack '$stack_name' brought down (removed)." \
-                || _die "Failed to bring down Swarm stack '$stack_name'."
+                || _log EXIT "Failed to bring down Swarm stack '$stack_name'."
             ;;
         local)
             $csm_cmd compose -f "$f" down \
                 && _log PASS "Stack '$stack_name' brought down." \
-                || _die "Failed to bring down Local stack '$stack_name'."
+                || _log EXIT "Failed to bring down Local stack '$stack_name'."
             ;;
     esac
 }
@@ -468,7 +467,7 @@ stack_bounce() {
             _log INFO "Re-deploying Swarm stack '$stack_name'..."
             docker stack deploy -c "$f" "$stack_name" \
                 && _log PASS "Swarm stack '$stack_name' re-deployed." \
-                || _die "Failed to re-deploy Swarm stack '$stack_name'."
+                || _log EXIT "Failed to re-deploy Swarm stack '$stack_name'."
             ;;
         local)
             _log INFO "Bouncing Local stack '$stack_name'..."
@@ -487,12 +486,12 @@ stack_start() {
             _log WARN "Swarm does not support 'start' without redeployment. Running full deploy."
             docker stack deploy -c "$f" "$stack_name" \
                 && _log PASS "Swarm stack '$stack_name' deployed." \
-                || _die "Failed to deploy Swarm stack '$stack_name'."
+                || _log EXIT "Failed to deploy Swarm stack '$stack_name'."
             ;;
         local)
             $csm_cmd compose -f "$f" start \
                 && _log PASS "Stack '$stack_name' started." \
-                || _die "Failed to start Local stack '$stack_name'."
+                || _log EXIT "Failed to start Local stack '$stack_name'."
             ;;
     esac
 }
@@ -506,12 +505,12 @@ stack_restart() {
             _log WARN "Swarm does not support 'restart' without redeployment. Running full deploy."
             docker stack deploy -c "$f" "$stack_name" \
                 && _log PASS "Swarm stack '$stack_name' deployed." \
-                || _die "Failed to deploy Swarm stack '$stack_name'."
+                || _log EXIT "Failed to deploy Swarm stack '$stack_name'."
             ;;
         local)
             $csm_cmd compose -f "$f" restart \
                 && _log PASS "Stack '$stack_name' restarted." \
-                || _die "Failed to restart Local stack '$stack_name'."
+                || _log EXIT "Failed to restart Local stack '$stack_name'."
             ;;
     esac
 }
@@ -525,12 +524,12 @@ stack_stop() {
             _log WARN "Swarm does not support 'stop' without removal. Executing full removal."
             docker stack rm "$stack_name" \
                 && _log PASS "Swarm stack '$stack_name' removed." \
-                || _die "Failed to remove Swarm stack '$stack_name'."
+                || _log EXIT "Failed to remove Swarm stack '$stack_name'."
             ;;
         local)
             $csm_cmd compose -f "$f" stop \
                 && _log PASS "Stack '$stack_name' stopped." \
-                || _die "Failed to stop Local stack '$stack_name'."
+                || _log EXIT "Failed to stop Local stack '$stack_name'."
             ;;
     esac
 }
@@ -544,14 +543,14 @@ stack_update() {
             _log INFO "Pulling latest images for '$stack_name'..."
             docker stack deploy -c "$f" "$stack_name" \
                 && _log PASS "Swarm stack '$stack_name' updated (redeployed)." \
-                || _die "Failed to update Swarm stack '$stack_name'."
+                || _log EXIT "Failed to update Swarm stack '$stack_name'."
             ;;
         local)
             _log INFO "Pulling latest images for '$stack_name'..."
             $csm_cmd compose -f "$f" pull
             $csm_cmd compose -f "$f" up -d \
                 && _log PASS "Stack '$stack_name' updated." \
-                || _die "Failed to update Local stack '$stack_name'."
+                || _log EXIT "Failed to update Local stack '$stack_name'."
             ;;
     esac
 }
@@ -561,10 +560,10 @@ stack_update() {
 # =============================================================================
 
 stack_list() {
-    [[ -d "$csm_dir" ]] || _die "Stacks directory not found: $csm_dir"
+    [[ -d "$csm_dir" ]] || _log EXIT "Stacks directory not found: $csm_dir"
 
     local swarm_active=false
-    _is_swarm_active && swarm_active=true
+    _detect_swarm && swarm_active=true
 
     local -a valid_stacks=()
     local -a empty_dirs=()
@@ -633,7 +632,7 @@ stack_list() {
 
 stack_ps() {
     local swarm_active=false
-    _is_swarm_active && swarm_active=true
+    _detect_swarm && swarm_active=true
 
     {
         printf "%sCONTAINER ID  NAME  STATUS  PORTS%s\n" "${bld}" "${rst}"
@@ -690,7 +689,7 @@ stack_validate() {
             if $csm_cmd compose -f "$f" config -q 2>&1; then
                 _log PASS "Config valid: $f"
             else
-                _die "Config invalid: $f"
+                _log EXIT "Config invalid: $f"
             fi
             ;;
     esac
@@ -735,7 +734,7 @@ stack_logs() {
 stack_cd() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
-    [[ -d "$stack_dir" ]] || _die "Stack '$stack_name' not found at $stack_dir"
+    [[ -d "$stack_dir" ]] || _log EXIT "Stack '$stack_name' not found at $stack_dir"
     echo "$stack_dir"
 }
 
