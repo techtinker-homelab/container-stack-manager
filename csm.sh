@@ -556,7 +556,110 @@ stack_update() {
 }
 
 # =============================================================================
-# 6. INFORMATION (public)
+# 6. SECRETS MANAGEMENT (public)
+# =============================================================================
+
+_safe_secret() {
+    local secret_file="$1"
+    local value="${2-}"
+    local old_umask
+    local rc
+
+    old_umask="$(umask)"
+    umask 077
+
+    if [[ -n "$value" ]]; then
+        printf '%s' "$value" > "$secret_file"
+    else
+        cat > "$secret_file"
+    fi
+    rc=$?
+
+    umask "$old_umask" || return 1
+    (( rc == 0 )) || return "$rc"
+
+    chmod 600 "$secret_file"
+}
+
+secret_create() {
+    local name="$1"
+    local secret_file="${csm_secrets}/${name}.secret"
+
+    [[ -n "$name" ]] || _log EXIT "Secret name is required."
+
+    [[ ! -d "$csm_secrets" ]] && _log EXIT "The csm_secrets directory does not exist. Unable to create backup secret, exiting."
+
+    _detect_swarm || _log EXIT "Swarm must be active to create Docker secrets."
+
+    if docker secret inspect "$name" >/dev/null 2>&1; then
+        _log EXIT "Docker secret '$name' already exists. Use 'secret-rm' first."
+    fi
+
+    if [[ -f "$secret_file" ]]; then
+        [[ ! -L "$secret_file" ]] || _log EXIT "Refusing symlinked secret file: $secret_file"
+        [[ -r "$secret_file" ]] || _log EXIT "Secret file exists but is not readable: $secret_file"
+        local perms="$(stat -c '%a' "$secret_file" 2>/dev/null || stat -f '%Lp' "$secret_file" 2>/dev/null || true)"
+        [[ "$perms" == "600" ]] || _log WARN "Secret file permissions are $perms, expected 600."
+        docker secret create "$name" "$secret_file" \
+            && _log PASS "Docker secret '$name' created from $secret_file." \
+            || _log EXIT "Failed to create Docker secret '$name' from file."
+        return 0
+    fi
+
+    if [[ ! -t 0 ]]; then
+        _safe_secret "$secret_file"
+        [[ -s "$secret_file" ]] || { rm -f "$secret_file"; _log EXIT "Secret value is required."; }
+
+        docker secret create "$name" "$secret_file" \
+            && _log PASS "Docker secret '$name' created from stdin (saved to $secret_file)." \
+            || { rm -f "$secret_file"; _log EXIT "Failed to create Docker secret '$name'."; }
+        return 0
+    fi
+
+    local value=""
+    read -r -s -p "Enter secret value for '$name': " value
+    printf '\n' >&2
+    [[ -n "$value" ]] || _log EXIT "Secret value is required."
+
+    _safe_secret "$secret_file" "$value"
+
+    docker secret create "$name" "$secret_file" \
+        && _log PASS "Docker secret '$name' created from prompt input (saved to $secret_file)." \
+        || { rm -f "$secret_file"; _log EXIT "Failed to create Docker secret '$name'."; }
+
+    unset value
+}
+
+secret_remove() {
+    local name="$1"
+    local secret_file="${csm_secrets}/${name}.secret"
+    [[ -n "$name" ]] || _log EXIT "Secret name is required."
+    _confirm_no "Remove Docker secret '$name' and backup file?" || { _log INFO "Cancelled."; return 0; }
+    _detect_swarm || _log EXIT "Swarm must be active to remove Docker secrets."
+    if ! docker secret inspect "$name" >/dev/null 2>&1; then
+        _log EXIT "Docker secret '$name' not found."
+    fi
+    docker secret rm "$name" \
+        && _log PASS "Docker secret '$name' removed." \
+        || _log EXIT "Failed to remove Docker secret '$name' (it may still be attached to a service)."
+    if [[ -f "$secret_file" ]]; then
+        [[ ! -L "$secret_file" ]] || _log EXIT "Refusing symlinked secret file: $secret_file"
+        rm -f "$secret_file" \
+            && _log PASS "Backup secret file removed: $secret_file" \
+            || _log WARN "Failed to remove backup secret file: $secret_file"
+    fi
+}
+
+secret_list() {
+    if ! _detect_swarm; then
+        _log EXIT "Swarm must be active to list Docker secrets."
+    fi
+
+    docker secret ls --format "table {{.Name}}\t{{.CreatedAt}}\t{{.UpdatedAt}}"
+}
+
+# =============================================================================
+# 7. INFORMATION (public)
 # =============================================================================
 
 stack_list() {
@@ -894,6 +997,11 @@ ${bld}Information:${rst}
 ${bld}Config:${rst}
     cfg | config  show | edit | reload
 
+${bld}Secrets:${rst}
+    secret     <name> <value>   Create a Docker secret (swarm required)
+    secret-rm  <name>           Remove a Docker secret
+    secret-ls                  List all Docker secrets
+
 ${bld}Options:${rst}
     -h | --help            Show this help
     -V | --version         Show version
@@ -948,6 +1056,9 @@ main() {
         net)            net_info        "$@" ;;
         cfg|config)     manage_configs  "$@" ;;
         t|template)     manage_template "$@" ;;
+        secret)         secret_create   "$@" ;;
+        secret-rm)      secret_remove   "$@" ;;
+        secret-ls)      secret_list          ;;
         *) _log FAIL "Unknown command: '$cmd'"; show_help; exit 1 ;;
     esac
 }

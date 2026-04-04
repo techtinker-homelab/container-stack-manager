@@ -15,44 +15,6 @@ A unified CLI tool for managing Docker and Podman Compose stacks on a single hos
 
 ---
 
-## File Layout
-
-### Repository (Pre-install)
-```text
-<repo>/
-├── csm.sh              ← Main runtime script (symlinked to /usr/local/bin/csm during install)
-├── csm-install.sh      ← One-shot installer (run once; sets up the environment)
-├── example.conf        ← Default configuration values (copied as default.conf during install)
-└── example.env         ← Example global environment template
-```
-
-### Installed Environment (Post-install)
-By default, CSM installs everything to `/srv/stacks` (accessible via a `~/stacks` symlink in your home folder).
-
-```text
-/srv/stacks/                           ← CSM_ROOT_DIR
-   ├── .backup/                        ← Automated stack tarball backups
-   │  └── <stack_name>_YYYYMMDD.tar.gz ← Archived stack directory
-   ├── .common/                        ← Shared resources and tools
-   │  ├── .docker.env                  ← Global shared environment variables
-   │  ├── csm.sh                       ← The CSM script with all container management functions
-   │  ├── configs/                     ← Variables and configuration files
-   │  │  ├── default.conf              ← CSM default configs (patched during install)
-   │  │  └── user.conf                 ← User overrides (edit this!)
-   │  ├── secrets/                     ← Directory for shared docker secrets
-   │  │  └── <variable_name>.secret    ← Secret variables (one line per file)
-   │  └── templates/                   ← Pre-built stacks with compose and .env
-   │     └── <stack>/
-   │        ├── compose.yml
-   │        └── example.env
-   └── <stack_name>/                   ← Your actual container stacks
-      ├── .env                         ← Stack-specific environment variables (or symlink to global)
-      ├── compose.yml                  ← The compose file
-      └── appdata/                     ← Persistent mapped volumes
-```
-
----
-
 ## Installation Guide
 
 **Prerequisites:** A Linux host (Debian, Ubuntu, Fedora, or Arch). You do not need a container runtime pre-installed; the installer will handle it.
@@ -104,6 +66,44 @@ sudo ~/container-stack-manager/csm-install.sh
 - **NOTE:** If you were added to the runtime group, **log out and log back in** to your terminal session (or reboot) so group ownership is applied before using the `csm` command.
 - Access your stacks at `~/stacks`.
 - Customize your setup by editing the user config: `micro ~/stacks/.common/configs/user.conf`.
+
+---
+
+## File Layout
+
+### Repository (Pre-install)
+```text
+<repo>/
+├── csm.sh              ← Main runtime script (symlinked to /usr/local/bin/csm during install)
+├── csm-install.sh      ← One-shot installer (run once; sets up the environment)
+├── example.conf        ← Default configuration values (copied as default.conf during install)
+└── example.env         ← Example global environment template
+```
+
+### Installed Environment (Post-install)
+By default, CSM installs everything to `/srv/stacks` (accessible via a `~/stacks` symlink in your home folder).
+
+```text
+/srv/stacks/                           ← CSM_ROOT_DIR
+   ├── .backup/                        ← Automated stack tarball backups
+   │  └── <stack_name>_YYYYMMDD.tar.gz ← Archived stack directory
+   ├── .common/                        ← Shared resources and tools
+   │  ├── .docker.env                  ← Global shared environment variables
+   │  ├── csm.sh                       ← The CSM script with all container management functions
+   │  ├── configs/                     ← Variables and configuration files
+   │  │  ├── default.conf              ← CSM default configs (patched during install)
+   │  │  └── user.conf                 ← User overrides (edit this!)
+   │  ├── secrets/                     ← Directory for shared docker secrets
+   │  │  └── <variable_name>.secret    ← Secret variables (one line per file)
+   │  └── templates/                   ← Pre-built stacks with compose and .env
+   │     └── <stack>/
+   │        ├── compose.yml
+   │        └── example.env
+   └── <stack_name>/                   ← Your actual container stacks
+      ├── .env                         ← Stack-specific environment variables (or symlink to global)
+      ├── compose.yml                  ← The compose file
+      └── appdata/                     ← Persistent mapped volumes
+```
 
 ---
 
@@ -197,6 +197,19 @@ csm <command> [<stack-name>] [options]
 | `config show` | Print active config values |
 | `config edit` | Open `user.conf` in `$EDITOR` |
 | `config reload` | Re-source config files |
+
+### Secrets Management
+
+| Command | Aliases | Description |
+|---|---|---|
+| `secret <name>` | | Create a Docker secret from file, stdin, or prompt (swarm required) |
+| `secret-rm <name>` | | Remove a Docker secret and its backup file |
+| `secret-ls` | | List all Docker secrets |
+
+Secrets are stored in `CSM_ROOT_DIR/.common/secrets/` as `<name>.secret` files with `600` permissions. When creating a secret, CSM will:
+1. Use an existing `.secret` file if present
+2. Read from stdin if piped
+3. Prompt for input interactively (hidden)
 
 ### Options
 
