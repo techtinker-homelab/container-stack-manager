@@ -27,7 +27,7 @@ fi
 
 set -euo pipefail
 
-readonly INSTALLER_VERSION="0.2.1"
+readonly INSTALLER_VERSION="0.2.2"
 
 _runtime=""   # set by _detect_container_runtime or _install_container_runtime
 
@@ -370,39 +370,45 @@ _setup_directories() {
 
 _setup_files() {
     _log STEP "_setup_files: installing CSM core files..."
+
+    # 1. Install loop with smart mode detection
     for src in "${!files_to_install[@]}"; do
         local dest_dir="${files_to_install[$src]}"
-        local mode
-        [[ "$src" == *.conf ]] && mode="$mode_conf" || mode="$mode_exec"
+        local mode="$mode_conf"
+        [[ -d "$src" || "$src" == *.sh ]] && mode="$mode_exec"
+
         _install_file "$src" "$dest_dir" "$mode"
     done
+
     local conf_example="${csm_configs}/example.conf"
     local conf_default="${csm_configs}/default.conf"
     local conf_user="${csm_configs}/user.conf"
-    if [[ -f "$conf_example" && ! -f "$conf_default" ]]; then
-        _log STEP "_setup_files: creating $conf_default"
-        $var_sudo cp "$conf_example" "$conf_default"
-        _log INFO "Copied $conf_example → $conf_default"
-    fi
-    if [[ -f "$conf_default" ]]; then
-        _log STEP "_setup_files: patching CSM_CONTAINER_RUNTIME=${_runtime}, CSM_STACKS_GID=${csm_gid}, and CSM_STACKS_UID=${csm_uid} into default.conf"
-        sed -i "s/^CSM_CONTAINER_RUNTIME=.*/CSM_CONTAINER_RUNTIME=${_runtime}/" "$conf_default"
-        sed -i "s/^CSM_STACKS_GID=.*/CSM_STACKS_GID=${csm_gid}/" "$conf_default"
-        sed -i "s/^CSM_STACKS_UID=.*/CSM_STACKS_UID=${csm_uid}/" "$conf_default"
-        _log INFO "Patched CSM_CONTAINER_RUNTIME=${_runtime} and CSM_STACKS_GID=${csm_gid} into default.conf"
-    fi
-    if [[ -f "$conf_default" && ! -f "$conf_user" ]]; then
-        _log STEP "_setup_files: creating $conf_user"
-        $var_sudo cp "$conf_default" "$conf_user"
-        _log INFO "Copied $conf_default → $conf_user"
-    fi
-    if [[ -f "$conf_user" ]]; then
-        _log STEP "_setup_files: patching CSM_CONTAINER_RUNTIME=${_runtime}, CSM_STACKS_GID=${csm_gid}, and CSM_STACKS_UID=${csm_uid} into user.conf"
-        sed -i "s/^CSM_CONTAINER_RUNTIME=.*/CSM_CONTAINER_RUNTIME=${_runtime}/" "$conf_user"
-        sed -i "s/^CSM_STACKS_GID=.*/CSM_STACKS_GID=${csm_gid}/" "$conf_user"
-        sed -i "s/^CSM_STACKS_UID=.*/CSM_STACKS_UID=${csm_uid}/" "$conf_user"
-        _log INFO "Patched CSM_CONTAINER_RUNTIME=${_runtime}, CSM_STACKS_GID=${csm_gid}, and CSM_STACKS_UID=${csm_uid} into user.conf"
-    fi
+
+    # 2. Handle initial file creation
+    [[ -f "$conf_example" && ! -f "$conf_default" ]] && \
+        $var_sudo cp "$conf_example" "$conf_default" && \
+        _log INFO "Initial setup: Created $conf_default"
+
+    [[ -f "$conf_default" && ! -f "$conf_user" ]] && \
+        $var_sudo cp "$conf_default" "$conf_user" && \
+        _log INFO "Initial setup: Created $conf_user"
+
+    # 3. Consolidated Patching Logic
+    local files_to_patch=()
+    [[ -f "$conf_default" ]] && files_to_patch+=("$conf_default")
+    [[ -f "$conf_user" ]] && files_to_patch+=("$conf_user")
+
+    for target_conf in "${files_to_patch[@]}"; do
+        _log STEP "_setup_files: patching variables into $(basename "$target_conf")"
+
+        sed -i -e "s|^CSM_CONTAINER_RUNTIME=.*|CSM_CONTAINER_RUNTIME=${_runtime}|" \
+               -e "s|^CSM_STACKS_GID=.*|CSM_STACKS_GID=${csm_gid}|" \
+               -e "s|^CSM_STACKS_UID=.*|CSM_STACKS_UID=${csm_uid}|" \
+               "$target_conf"
+
+        _log INFO "Patched runtime and IDs into $target_conf"
+    done
+
     _log INFO "_setup_files: done"
 }
 
