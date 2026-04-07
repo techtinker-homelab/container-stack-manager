@@ -37,7 +37,7 @@
 
 set -euo pipefail
 
-readonly CSM_VERSION="0.2.0"
+readonly CSM_VERSION="0.2.1"
 readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 csm_cmd=""    # set by _detect_command
@@ -168,7 +168,7 @@ _detect_scope() {
     if [[ -f "$f" ]]; then
         if grep -qE '^\s+mode:\s+(global|replicated)' "$f" 2>/dev/null \
             || grep -qE '^\s+endpoint_mode:' "$f" 2>/dev/null \
-            || grep -qE '^\s+placement:' "$f" 2>/dev/null; then
+            || grep -qE '^\s+placement:' "$f" 2>/dev/null; \
             || grep -qE '^\s+deploy:' "$f" 2>/dev/null; then
             _log STEP "_detect_scope: swarm syntax detected in compose.yml -> swarm"
             scope="swarm"
