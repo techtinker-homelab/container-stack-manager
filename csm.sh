@@ -168,7 +168,7 @@ _detect_scope() {
     if [[ -f "$f" ]]; then
         if grep -qE '^\s+mode:\s+(global|replicated)' "$f" 2>/dev/null \
             || grep -qE '^\s+endpoint_mode:' "$f" 2>/dev/null \
-            || grep -qE '^\s+placement:' "$f" 2>/dev/null; \
+            || grep -qE '^\s+placement:' "$f" 2>/dev/null \
             || grep -qE '^\s+deploy:' "$f" 2>/dev/null; then
             _log STEP "_detect_scope: swarm syntax detected in compose.yml -> swarm"
             scope="swarm"
