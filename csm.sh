@@ -49,6 +49,8 @@ readonly mode_exec="770"   # executables: rwxrwx---
 readonly mode_conf="660"   # config files: rw-rw----
 readonly mode_auth="600"   # secrets:      rw-------
 
+local CSM_DEBUG="1"
+
 # =============================================================================
 # 1. HELPER FUNCTIONS
 # =============================================================================
