@@ -33,7 +33,7 @@ _color_setup() {
         grn=$(_tput_safe setaf 2)
         ylw=$(_tput_safe setaf 3)
         blu=$(_tput_safe setaf 4)
-        prp=$(_tput_safe setaf 5)
+        mgn=$(_tput_safe setaf 5)
         cyn=$(_tput_safe setaf 6)
         wht=$(_tput_safe setaf 7)
         blk=$(_tput_safe setaf 0)
@@ -41,7 +41,7 @@ _color_setup() {
         uln=$(_tput_safe smul)
         rst=$(_tput_safe sgr0)
     else
-        red="" grn="" ylw="" blu="" prp="" cyn=""
+        red="" grn="" ylw="" blu="" mgn="" cyn=""
         wht="" blk="" bld="" uln="" rst=""
     fi
 }
@@ -50,12 +50,13 @@ _color_setup
 _log() {
     local level="${1:-INFO}" message="${2:-}"
     case "$level" in
-        FAIL) printf "%s FAIL  >> %s%s\n" "${red}${bld}" "${message}" "${rst}" >&2 ;;
-        WARN) printf "%s WARN  >> %s%s\n" "${ylw}${bld}" "${message}" "${rst}" >&2 ;;
-        INFO) printf "%s INFO  >> %s%s\n" "${cyn}${bld}" "${message}" "${rst}" ;;
-        PASS) printf "%s PASS  >> %s%s\n" "${grn}${bld}" "${message}" "${rst}" ;;
-        STEP) printf "%s -- %s%s\n" "${blu}${bld}" "${message}" "${rst}" ;;
-        *)    printf "%s DEBUG >> %s%s\n" "${blu}${bld}" "${message}" "${rst}" ;;
+        EXIT) printf "%s EXIT >> %s%s\n" "${red}${bld}" "${message}" "${rst}" >&2; exit 1 ;;
+        FAIL) printf "%s FAIL >> %s%s\n" "${red}${bld}" "${message}" "${rst}" >&2 ;;
+        INFO) printf "%s INFO >> %s%s\n" "${cyn}${bld}" "${message}" "${rst}" ;;
+        PASS) printf "%s PASS >> %s%s\n" "${grn}${bld}" "${message}" "${rst}" ;;
+        STEP) [[ "${CSM_DEBUG:-1}" == "1" ]] && printf "%s STEP >> %s%s\n" "${mgn}${bld}" "${message}" "${rst}" ;;
+        WARN) printf "%s WARN >> %s%s\n" "${ylw}${bld}" "${message}" "${rst}" >&2 ;;
+        *)    printf "%s WARN >> _log: unknown level '%s'%s\n" "${ylw}${bld}" "${level}" "${rst}" >&2 ;;
     esac
 }
 
@@ -144,17 +145,25 @@ _detect_pkg_manager() {
         _log WARN "Unsupported package manager – install curl, git manually if needed."
         pkg_mgr=""
     fi
+    _log STEP "_detect_pkg_manager: detected=$pkg_mgr"
 }
 
 _install_pkg() {
     [[ -z "${pkg_mgr:-}" ]] && { _log WARN "No pkg manager – skipping: $*"; return 0; }
+    _log STEP "_install_pkg: using $pkg_mgr to install: $*"
     case "$pkg_mgr" in
         apt-get)
+            _log STEP "_install_pkg: running apt-get update -qq"
             $var_sudo apt-get update -qq
+            _log STEP "_install_pkg: running apt-get install -y $*"
             $var_sudo apt-get install -y "$@"
             ;;
-        dnf|yum) $var_sudo "$pkg_mgr" install -y "$@" ;;
-        pacman)  $var_sudo pacman -S --noconfirm "$@" ;;
+        dnf|yum)
+            _log STEP "_install_pkg: running $pkg_mgr install -y $*"
+            $var_sudo "$pkg_mgr" install -y "$@" ;;
+        pacman)
+            _log STEP "_install_pkg: running pacman -S --noconfirm $*"
+            $var_sudo pacman -S --noconfirm "$@" ;;
     esac
 }
 
@@ -176,19 +185,23 @@ _detect_container_runtime() {
     if command -v docker >/dev/null 2>&1; then
         _log PASS "Docker found: $(docker --version)"
         _runtime="docker"
+        _log STEP "_detect_container_runtime: docker detected"
         return 0
     elif command -v podman >/dev/null 2>&1; then
         _log PASS "Podman found: $(podman --version)"
         _runtime="podman"
+        _log STEP "_detect_container_runtime: podman detected"
         return 0
     fi
+    _log STEP "_detect_container_runtime: no runtime found"
     return 1
 }
 
 _install_docker() {
-    _log INFO "Installing Docker via get.docker.com..."
+    _log STEP "_install_docker: downloading get.docker.com..."
     curl -fsSL https://get.docker.com -o /tmp/get-docker.sh \
         || _die "Failed to download Docker installer."
+    _log STEP "_install_docker: running installer..."
     $var_sudo sh /tmp/get-docker.sh \
         || _die "Docker installation failed."
     rm -f /tmp/get-docker.sh
@@ -197,13 +210,14 @@ _install_docker() {
 }
 
 _install_podman() {
-    _log INFO "Installing Podman..."
+    _log STEP "_install_podman: installing via package manager..."
     _install_pkg podman
     _log PASS "Podman installed: $(podman --version)"
     _runtime="podman"
 }
 
 _install_container_runtime() {
+    _log STEP "_install_container_runtime: checking for existing runtime..."
     if _detect_container_runtime; then
         _log INFO "Container runtime already installed – skipping installation."
         return 0
@@ -216,6 +230,7 @@ _install_container_runtime() {
 
     local choice=""
     read -r -p "${ylw}${bld} Select [1/2]: ${rst}" choice
+    _log STEP "_install_container_runtime: user choice=$choice"
     case "$choice" in
         1|docker) _install_docker ;;
         2|podman) _install_podman ;;
@@ -229,6 +244,7 @@ _install_container_runtime() {
 # =============================================================================
 
 _check_container_service() {
+    _log STEP "_check_container_service: runtime=$_runtime"
     case "$_runtime" in
         docker)
             _log STEP "Checking Docker service..."
@@ -236,12 +252,14 @@ _check_container_service() {
                 _log WARN "systemctl not found – skipping service check."
                 return 0
             fi
+            _log STEP "_check_container_service: checking systemctl is-active docker"
             if systemctl is-active --quiet docker; then
                 _log PASS "Docker service is running."
                 return 0
             fi
             _log WARN "Docker service is not running."
             _confirm_yes "Start Docker now?" && {
+                _log STEP "_check_container_service: running systemctl start docker"
                 $var_sudo systemctl start docker
                 systemctl is-active --quiet docker \
                     && _log PASS "Docker started." \
@@ -254,12 +272,14 @@ _check_container_service() {
                 _log WARN "systemctl not found – skipping service check."
                 return 0
             fi
+            _log STEP "_check_container_service: checking systemctl is-active podman.socket"
             if systemctl is-active --quiet podman.socket 2>/dev/null; then
                 _log PASS "Podman socket is active."
                 return 0
             fi
             _log WARN "Podman socket is not active (optional for rootless)."
             _confirm_yes "Enable Podman socket?" && {
+                _log STEP "_check_container_service: running systemctl enable --now podman.socket"
                 $var_sudo systemctl enable --now podman.socket
                 _log PASS "Podman socket enabled."
             }
@@ -273,8 +293,10 @@ _check_container_service() {
 
 _create_runtime_group() {
     local gid=2000
+    _log STEP "_create_runtime_group: checking if group '$csm_group' (GID $gid) exists..."
 
     if ! getent group "$gid" >/dev/null 2>&1; then
+        _log STEP "_create_runtime_group: creating group..."
         $var_sudo groupadd -g "$gid" "$csm_group" \
             && _log INFO "Created group '$csm_group' (GID $gid)" \
             || _die "Failed to create group '$csm_group'"
@@ -284,11 +306,14 @@ _create_runtime_group() {
 
     # Use the actual GID (may differ if group already existed with different GID)
     csm_gid="$(getent group "$csm_group" | cut -d: -f3)"
+    _log STEP "_create_runtime_group: resolved csm_gid=$csm_gid"
 
     local current_user="${SUDO_USER:-$(id -un)}"
+    _log STEP "_create_runtime_group: checking if user '$current_user' is in group '$csm_group'..."
     if ! groups "$current_user" 2>/dev/null | grep -qw "$csm_group"; then
         _log WARN "User '$current_user' is not in the '$csm_group' group."
         _confirm_yes "Add '$current_user' to '$csm_group'?" && {
+            _log STEP "_create_runtime_group: running gpasswd -a $current_user $csm_group"
             $var_sudo gpasswd -a "$current_user" "$csm_group"
             _log INFO "User added. Log out and back in for this to take effect."
         }
@@ -304,6 +329,7 @@ _create_runtime_group() {
 _install_dir() {
     local tgt="$1" mode="$2"
     if [[ ! -d "$tgt" ]]; then
+        _log STEP "_install_dir: creating $tgt (mode=$mode)"
         $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -d "$tgt"
         _log INFO "Created: $tgt"
     else
@@ -314,6 +340,7 @@ _install_dir() {
 _install_file() {
     local src="$1" dest_dir="$2" mode="$3"
     if [[ -f "$src" ]]; then
+        _log STEP "_install_file: installing $(basename "$src") → $dest_dir (mode=$mode)"
         $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" "$src" "$dest_dir/"
         _log INFO "Installed: $(basename "$src") → $dest_dir"
     else
@@ -322,17 +349,18 @@ _install_file() {
 }
 
 _setup_directories() {
-    _log STEP "Creating CSM directory structure under ${CSM_ROOT_DIR}..."
+    _log STEP "_setup_directories: creating structure under ${CSM_ROOT_DIR}..."
     _install_dir "$CSM_ROOT_DIR" "$mode_dir"
     _install_dir "$csm_backup"   "$mode_dir"
     _install_dir "$csm_common"   "$mode_dir"
     _install_dir "$csm_stacks"   "$mode_dir"
     _install_dir "$csm_configs"  "$mode_dir"
     _install_dir "$csm_secrets"  "$mode_dir"
+    _log STEP "_setup_directories: done"
 }
 
 _setup_files() {
-    _log STEP "Installing CSM core files..."
+    _log STEP "_setup_files: installing CSM core files..."
     for src in "${!files_to_install[@]}"; do
         local dest_dir="${files_to_install[$src]}"
         local mode
@@ -344,16 +372,19 @@ _setup_files() {
     local example_conf="${csm_configs}/example.conf"
     local default_conf="${csm_configs}/default.conf"
     if [[ -f "$example_conf" && ! -f "$default_conf" ]]; then
+        _log STEP "_setup_files: renaming example.conf → default.conf"
         $var_sudo mv "$example_conf" "$default_conf"
         _log INFO "Renamed example.conf → default.conf"
     fi
 
     # Patch detected runtime values into default.conf
     if [[ -f "$default_conf" ]]; then
+        _log STEP "_setup_files: patching CSM_CONTAINER_RUNTIME=${_runtime} and CSM_STACKS_GID=${csm_gid} into default.conf"
         sed -i "s/^CSM_CONTAINER_RUNTIME=.*/CSM_CONTAINER_RUNTIME=${_runtime}/" "$default_conf"
         sed -i "s/^CSM_STACKS_GID=.*/CSM_STACKS_GID=${csm_gid}/" "$default_conf"
         _log INFO "Patched CSM_CONTAINER_RUNTIME=${_runtime} and CSM_STACKS_GID=${csm_gid} into default.conf"
     fi
+    _log STEP "_setup_files: done"
 }
 
 # =============================================================================
@@ -361,11 +392,13 @@ _setup_files() {
 # =============================================================================
 
 _setup_symlinks() {
-    _log STEP "Setting up symlinks..."
+    _log STEP "_setup_symlinks: setting up symlinks..."
 
     # ~/stacks  → CSM_ROOT_DIR
     local target_dir="$CSM_ROOT_DIR"
+    _log STEP "_setup_symlinks: checking ~/stacks symlink ($link_path → $target_dir)"
     if [[ ! -e "$link_path" && ! -L "$link_path" ]]; then
+        _log STEP "_setup_symlinks: creating symlink $link_path → $target_dir"
         ln -s "$target_dir" "$link_path"
         _log INFO "Created symlink: $link_path → $target_dir"
     elif [[ -L "$link_path" ]]; then
@@ -374,6 +407,7 @@ _setup_symlinks() {
         if [[ "$current_target" != "$target_dir" ]]; then
             _log WARN "Symlink $link_path points to $current_target (expected $target_dir)"
             _confirm_no "Update symlink to point to $target_dir?" && {
+                _log STEP "_setup_symlinks: updating symlink $link_path"
                 rm -f "$link_path"
                 ln -s "$target_dir" "$link_path"
                 _log INFO "Symlink updated."
@@ -387,7 +421,9 @@ _setup_symlinks() {
 
     # /usr/local/bin/csm  → CSM_ROOT_DIR/csm.sh
     local csm_bin="${CSM_ROOT_DIR}/csm.sh"
+    _log STEP "_setup_symlinks: checking $bin_link → $csm_bin"
     if [[ ! -e "$bin_link" && ! -L "$bin_link" ]]; then
+        _log STEP "_setup_symlinks: creating symlink $bin_link → $csm_bin"
         $var_sudo ln -sf "$csm_bin" "$bin_link"
         _log INFO "Created symlink: $bin_link → $csm_bin"
     elif [[ -L "$bin_link" ]]; then
@@ -395,16 +431,28 @@ _setup_symlinks() {
     else
         _log WARN "$bin_link exists and is not a symlink – leaving it alone."
     fi
+    _log STEP "_setup_symlinks: done"
 }
 
-# =============================================================================
-# 10. OWNERSHIP
-# =============================================================================
-
 _set_ownership() {
-    _log STEP "Setting group on ${CSM_ROOT_DIR} to ${csm_group}..."
-    [ "$(_get_group "$CSM_ROOT_DIR")" != "$csm_group" ] && $var_sudo chgrp "$csm_group" "$CSM_ROOT_DIR"
-    [ "$(_get_perms "$CSM_ROOT_DIR" | cut -c6)" != "s" ] && $var_sudo chmod g+s "$CSM_ROOT_DIR"
+    _log STEP "_set_ownership: setting group on ${CSM_ROOT_DIR} to ${csm_group}..."
+    local current_group
+    current_group="$(_get_group "$CSM_ROOT_DIR")"
+    _log STEP "_set_ownership: current group=$current_group, target=$csm_group"
+    [ "$current_group" != "$csm_group" ] && {
+        _log STEP "_set_ownership: running chgrp $csm_group $CSM_ROOT_DIR"
+        $var_sudo chgrp "$csm_group" "$CSM_ROOT_DIR"
+    }
+    local current_perms
+    current_perms="$(_get_perms "$CSM_ROOT_DIR")"
+    local sgid_bit
+    sgid_bit="$(echo "$current_perms" | cut -c6)"
+    _log STEP "_set_ownership: current perms=$current_perms, sgid bit=$sgid_bit"
+    [ "$sgid_bit" != "s" ] && {
+        _log STEP "_set_ownership: running chmod g+s $CSM_ROOT_DIR"
+        $var_sudo chmod g+s "$CSM_ROOT_DIR"
+    }
+    _log STEP "_set_ownership: done"
 }
 
 # =============================================================================
@@ -413,17 +461,27 @@ _set_ownership() {
 
 main() {
     _log STEP "CSM Installer v${INSTALLER_VERSION} – starting"
+    _log STEP "main: CSM_ROOT_DIR=$CSM_ROOT_DIR, csm_owner=$csm_owner, csm_uid=$csm_uid"
     _log INFO "Install root: ${CSM_ROOT_DIR}"
     _log INFO "Invoking user: ${csm_owner} (UID ${csm_uid})"
 
+    _log STEP "main: detecting package manager..."
     _detect_pkg_manager
+    _log STEP "main: detecting/installing container runtime..."
     _install_container_runtime
+    _log STEP "main: runtime=$_runtime"
     [[ "$_runtime" == "podman" ]] && csm_group="podman"
+    _log STEP "main: checking container service..."
     _check_container_service
+    _log STEP "main: creating runtime group..."
     _create_runtime_group
+    _log STEP "main: setting up directories..."
     _setup_directories
+    _log STEP "main: installing files..."
     _setup_files
+    _log STEP "main: setting up symlinks..."
     _setup_symlinks
+    _log STEP "main: setting ownership..."
     _set_ownership
 
     echo ""
