@@ -362,6 +362,8 @@ stack_edit() {
 
 stack_backup() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
+    stack_name="${stack_name%/}" # Strip trailing slash if present
+
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
     _log STEP "stack_backup: name=$stack_name, dir=$stack_dir"
     [[ -d "$stack_dir" ]] || _log EXIT "Stack '$stack_name' not found."
