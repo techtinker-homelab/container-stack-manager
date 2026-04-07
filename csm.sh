@@ -37,7 +37,7 @@
 
 set -euo pipefail
 
-readonly CSM_VERSION="0.2.1"
+readonly CSM_VERSION="0.2.3"
 readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 csm_cmd=""    # set by _detect_command
@@ -204,9 +204,10 @@ _load_config() {
     csm_modules="${CSM_MODULES_DIR:-${csm_dir}/.modules}"
 
     csm_net_name="${CSM_NETWORK_NAME:-csm_network}"
-    csm_uid="${CSM_STACKS_UID:-$(id -u)}"
     csm_gid="${CSM_STACKS_GID:-$(id -g)}"
-
+    csm_uid="${CSM_STACKS_UID:-$(id -u)}"
+    csm_group=$(id -gn "$csm_uid" 2>/dev/null || getent group "$csm_gid" | cut -d: -f1)
+    csm_owner=$(id -un "$csm_uid" 2>/dev/null || getent passwd "$csm_uid" | cut -d: -f1)
 
     _log STEP "_load_config: csm_dir=$csm_dir, csm_cmd will be detected next"
 }
@@ -981,7 +982,7 @@ net_info() {
             _log STEP "net_info: inspecting network $target"
             $csm_cmd network inspect "$target"
             ;;
-        ls|list)
+        l|ls|list)
             # Explicit list call
             _run_net_list
             ;;
@@ -992,7 +993,7 @@ net_info() {
             # If the action wasn't empty/list, it was a typo
             if [[ "$action" != "list" ]]; then
                 _log WARN "Unknown net action: $action"
-                _log INFO "Available: h|host, i|inspect [name], ls|list"
+                _log INFO "Available: h|host, i|inspect [name], l|ls|list"
                 return 1
             fi
             ;;
@@ -1012,12 +1013,14 @@ manage_config() {
             _log INFO "Active configuration:"
             printf "  %-28s = %s\n" \
                 "csm_cmd:"      "${csm_cmd:-<not detected>}" \
-                "csm_dir:"      "$csm_dir"   \
-                "csm_backups:"  "$csm_backups"  \
-                "csm_configs:"  "$csm_configs"  \
-                "csm_modules:"  "$csm_modules"  \
-                "csm_secrets:"  "$csm_secrets"  \
-                "csm_net_name:" "$csm_net_name" \
+                "csm_net_name:"  "$csm_net_name" \
+                "csm_gid/group:" "$csm_gid/$csm_group" \
+                "csm_uid/owner:" "$csm_uid/$csm_owner" \
+                "csm_dir:"       "$csm_dir"   \
+                "csm_backups:"   "$csm_backups"  \
+                "csm_configs:"   "$csm_configs"  \
+                "csm_modules:"   "$csm_modules"  \
+                "csm_secrets:"   "$csm_secrets"  \
             ;;
         edit)
             local ucfg="${csm_configs}/user.conf"
@@ -1102,6 +1105,7 @@ ${bld}Usage:${rst} csm <command> [<stack-name>] [options]
 
 ${bld}Stack Lifecycle:${rst}
     c  | create   <n>           Create a new stack directory + compose scaffold
+    n  | new      <n>           Create a new stack directory + compose scaffold
     e  | edit     <n>           Open compose.yml in \$EDITOR
     m  | modify   <old> <new>   Rename a stack directory
     rm | remove   <n>           Stop and remove containers in a stack (prompts)
@@ -1131,7 +1135,7 @@ ${bld}Information:${rst}
     t  | module               Template management (not yet implemented)
 
 ${bld}Config:${rst}
-    cfg | config  show | edit | reload
+    cfg | config (show | edit | reload)  Displays, Edits, or Reloads CSM configs.
 
 ${bld}Secrets:${rst}
     secret     <name> <value>   Create a Docker secret (swarm required)
@@ -1161,9 +1165,9 @@ main() {
     _load_config
 
     case "$cmd" in
-        -h|--help)    show_help; exit 0 ;;
-        -v|--version) echo "CSM v${CSM_VERSION}"; exit 0 ;;
-        --aliases)    _print_aliases; exit 0 ;;
+        --a|--aliases)    _print_aliases; exit 0 ;;
+        -h|--help|h|help) show_help; exit 0 ;;
+        -v|--version)     echo "CSM v${CSM_VERSION}"; exit 0 ;;
     esac
 
     _log STEP "Validating config..."
@@ -1174,7 +1178,7 @@ main() {
 
     _log STEP "Dispatching command: '$cmd'"
     case "$cmd" in
-        c|create|new)   stack_create    "$@" ;;
+        c|create|n|new) stack_create    "$@" ;;
         e|edit)         stack_edit      "$@" ;;
         r|rename)       stack_rename    "$@" ;;
         bu|backup)      stack_backup    "$@" ;;
