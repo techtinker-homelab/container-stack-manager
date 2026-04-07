@@ -27,7 +27,7 @@ fi
 
 set -euo pipefail
 
-readonly INSTALLER_VERSION="0.2.0"
+readonly INSTALLER_VERSION="0.2.1"
 
 _runtime=""   # set by _detect_container_runtime or _install_container_runtime
 
@@ -439,15 +439,26 @@ _setup_symlinks() {
         _log WARN "$link_source exists and is not a symlink – leaving it alone."
     fi
 
-    # /usr/local/bin/csm  → csm_configs/csm.sh
+# /usr/local/bin/csm  → csm_configs/csm.sh
     local csm_bin="${csm_configs}/csm.sh"
     _log STEP "_setup_symlinks: checking $bin_link → $csm_bin"
+
     if [[ ! -e "$bin_link" && ! -L "$bin_link" ]]; then
         _log STEP "_setup_symlinks: creating symlink $bin_link → $csm_bin"
         $var_sudo ln -sf "$csm_bin" "$bin_link"
         _log INFO "Created symlink: $bin_link → $csm_bin"
     elif [[ -L "$bin_link" ]]; then
-        _log PASS "Symlink $bin_link already exists."
+        # Check if the existing link points to the correct location
+        local current_target
+        current_target=$(readlink -f "$bin_link")
+
+        if [[ "$current_target" == "$csm_bin" ]]; then
+            _log PASS "Symlink $bin_link correctly points to $csm_bin."
+        else
+            _log WARN "Symlink $bin_link points to $current_target. Correcting..."
+            $var_sudo ln -sf "$csm_bin" "$bin_link"
+            _log INFO "Updated symlink: $bin_link → $csm_bin"
+        fi
     else
         _log WARN "$bin_link exists and is not a symlink – leaving it alone."
     fi
