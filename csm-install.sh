@@ -27,7 +27,7 @@ fi
 
 set -euo pipefail
 
-readonly INSTALLER_VERSION="0.2.2"
+readonly INSTALLER_VERSION="0.2.3"
 
 _runtime=""   # set by _detect_container_runtime or _install_container_runtime
 
@@ -132,7 +132,6 @@ readonly mode_auth="600" # secret files: rw-------
 # Files to install: source → destination directory
 declare -A files_to_install=(
     ["${script_dir}/csm.sh"]="${csm_configs}/"
-    ["${script_dir}/csm-install.sh"]="${csm_configs}/"
 )
 # example.conf → default.conf (only if default.conf doesn't already exist)
 [[ -f "${script_dir}/example.conf" ]] && \
