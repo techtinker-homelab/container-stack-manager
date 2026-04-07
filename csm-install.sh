@@ -385,15 +385,23 @@ _setup_files() {
         _log INFO "Copied $conf_example → $conf_default"
     fi
     if [[ -f "$conf_default" ]]; then
-        _log STEP "_setup_files: patching CSM_CONTAINER_RUNTIME=${_runtime} and CSM_STACKS_GID=${csm_gid} into default.conf"
+        _log STEP "_setup_files: patching CSM_CONTAINER_RUNTIME=${_runtime}, CSM_STACKS_GID=${csm_gid}, and CSM_STACKS_UID=${csm_uid} into default.conf"
         sed -i "s/^CSM_CONTAINER_RUNTIME=.*/CSM_CONTAINER_RUNTIME=${_runtime}/" "$conf_default"
         sed -i "s/^CSM_STACKS_GID=.*/CSM_STACKS_GID=${csm_gid}/" "$conf_default"
+        sed -i "s/^CSM_STACKS_UID=.*/CSM_STACKS_UID=${csm_uid}/" "$conf_default"
         _log INFO "Patched CSM_CONTAINER_RUNTIME=${_runtime} and CSM_STACKS_GID=${csm_gid} into default.conf"
     fi
     if [[ -f "$conf_default" && ! -f "$conf_user" ]]; then
         _log STEP "_setup_files: creating $conf_user"
         $var_sudo cp "$conf_default" "$conf_user"
         _log INFO "Copied $conf_default → $conf_user"
+    fi
+    if [[ -f "$conf_user" ]]; then
+        _log STEP "_setup_files: patching CSM_CONTAINER_RUNTIME=${_runtime}, CSM_STACKS_GID=${csm_gid}, and CSM_STACKS_UID=${csm_uid} into user.conf"
+        sed -i "s/^CSM_CONTAINER_RUNTIME=.*/CSM_CONTAINER_RUNTIME=${_runtime}/" "$conf_user"
+        sed -i "s/^CSM_STACKS_GID=.*/CSM_STACKS_GID=${csm_gid}/" "$conf_user"
+        sed -i "s/^CSM_STACKS_UID=.*/CSM_STACKS_UID=${csm_uid}/" "$conf_user"
+        _log INFO "Patched CSM_CONTAINER_RUNTIME=${_runtime}, CSM_STACKS_GID=${csm_gid}, and CSM_STACKS_UID=${csm_uid} into user.conf"
     fi
     _log INFO "_setup_files: done"
 }
