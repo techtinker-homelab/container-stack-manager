@@ -2,6 +2,16 @@
 # =============================================================================
 # csm-install.sh  –  Container Stack Manager Installer
 # =============================================================================
+
+# Prevent sourcing — must be executed directly
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    : # running directly, proceed
+else
+    echo "ERROR: This script must be executed directly, not sourced." >&2
+    echo "Run: bash csm-install.sh  (or ./csm-install.sh)" >&2
+    return 1 2>/dev/null || exit 1
+fi
+
 # What this script does (in order):
 #   1.  Validate root / sudo access
 #   2.  Detect OS package manager
