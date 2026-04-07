@@ -13,21 +13,22 @@
 #   └── example.env
 #
 # Installed layout:
-#   /srv/stacks/                   ← CSM_ROOT_DIR
+#   /srv/stacks/                   ← CSM_DIR
+#   ├── csm.sh
 #   ├── .backup/
 #   │   └── <stack>/<stack>-YYYYMMDD_HHMMSS.tar.gz
-#   ├── .common/
-#   │   ├── configs/
-#   │   │   ├── default.conf
-#   │   │   └── user.conf          ← user overrides (optional)
-#   │   ├── csm.sh
-#   │   ├── example.env
-#   │   ├── secrets/
-#   │   |    └── <variable_name>.secret
-#   │   └── templates/
-#   │        └── <stack>/
-#   │            ├── compose.yml
-#   │            └── example.env
+#   ├── .configs/
+#   |   ├── .example.env
+#   |   ├── .local.env
+#   |   ├── .swarm.env
+#   │   ├── default.conf
+#   │   └── user.conf          ← user overrides (optional)
+#   ├── .secrets/
+#   |   └── <variable_name>.secret
+#   └── .modules/
+#   │   └── <stack>/
+#   │       ├── compose.yml
+#   │       └── example.env
 #   └── <stack>/
 #       ├── .env
 #       ├── compose.yml
@@ -36,7 +37,7 @@
 
 set -euo pipefail
 
-readonly CSM_VERSION="1.1.0"
+readonly CSM_VERSION="0.2.0"
 readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 csm_cmd=""    # set by _detect_command
@@ -150,7 +151,7 @@ _detect_scope() {
     [[ "$csm_cmd" == "podman" ]] && { _log STEP "_detect_scope: podman -> local"; scope="local"; return; }
 
     # Explicit marker files still override auto-detect
-    [[ -f "${stack_dir}/.swarm" ]]  && { _log STEP "_detect_scope: .swarm marker found -> swarm"; scope="swarm"; return; }
+    [[ -f "${stack_dir}/.swarm" ]] && { _log STEP "_detect_scope: .swarm marker found -> swarm"; scope="swarm"; return; }
     [[ -f "${stack_dir}/.local" ]] && { _log STEP "_detect_scope: .local marker found -> local"; scope="local"; return; }
 
     # Swarm inactive — always local
@@ -163,11 +164,12 @@ _detect_scope() {
         return
     fi
 
-    # Not deployed yet — check compose file for swarm-specific syntax
+    # check compose file for swarm-specific syntax
     if [[ -f "$f" ]]; then
         if grep -qE '^\s+mode:\s+(global|replicated)' "$f" 2>/dev/null \
             || grep -qE '^\s+endpoint_mode:' "$f" 2>/dev/null \
             || grep -qE '^\s+placement:' "$f" 2>/dev/null; then
+            || grep -qE '^\s+deploy:' "$f" 2>/dev/null; then
             _log STEP "_detect_scope: swarm syntax detected in compose.yml -> swarm"
             scope="swarm"
             return
@@ -182,8 +184,8 @@ _detect_scope() {
 _load_config() {
     _log STEP "_load_config: loading config files..."
     for f in \
-        "${script_dir}/.common/configs/"*.conf \
-        "${script_dir}/.common/configs/user.conf" \
+        "${script_dir}/.configs/"*.conf \
+        "${script_dir}/.configs/user.conf" \
         "${HOME}/.config/csm/"*.conf \
         "${HOME}/.config/csm/user.conf"
     do
@@ -195,16 +197,16 @@ _load_config() {
         fi
     done
 
+    csm_dir="${CSM_ROOT_DIR:-/srv/stacks}"
+    csm_backups="${CSM_BACKUPS_DIR:-${csm_dir}/.backups}"
+    csm_configs="${CSM_CONFIGS_DIR:-${csm_dir}/.configs}"
+    csm_secrets="${CSM_SECRETS_DIR:-${csm_dir}/.secrets}"
+    csm_modules="${CSM_MODULES_DIR:-${csm_dir}/.modules}"
+
+    csm_net_name="${CSM_NETWORK_NAME:-csm_network}"
     csm_uid="${CSM_STACKS_UID:-$(id -u)}"
     csm_gid="${CSM_STACKS_GID:-$(id -g)}"
 
-    csm_dir="${CSM_ROOT_DIR:-/srv/stacks}"
-    csm_backup="${CSM_BACKUP_DIR:-${csm_dir}/.backup}"
-    csm_common="${CSM_COMMON_DIR:-${csm_dir}/.common}"
-    csm_configs="${CSM_CONFIGS_DIR:-${csm_common}/configs}"
-    csm_secrets="${CSM_SECRETS_DIR:-${csm_common}/secrets}"
-    csm_template="${CSM_TEMPLATE_DIR:-${csm_common}/templates}"
-    csm_net_name="${CSM_NETWORK_NAME:-csm_network}"
 
     _log STEP "_load_config: csm_dir=$csm_dir, csm_cmd will be detected next"
 }
@@ -212,7 +214,7 @@ _load_config() {
 _validate_config() {
     local errors=0
     _log STEP "_validate_config: checking directories..."
-    for dir in "$csm_dir" "$csm_backup" "$csm_common"; do
+    for dir in "$csm_dir" "$csm_backups"; do
         if [[ ! -d "$dir" ]]; then
             _log WARN "Directory not found: $dir  (run csm-install.sh to repair)"
             (( errors++ )) || true
@@ -302,7 +304,7 @@ _del_safe() {
 stack_create() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
-    local env_file="${csm_common}/.docker.env"
+    local env_file="${csm_configs}/.docker.env"
 
     _log STEP "stack_create: name=$stack_name, dir=$stack_dir"
     [[ -d "$stack_dir" ]] && _log EXIT "Stack '$stack_name' already exists at $stack_dir"
@@ -338,17 +340,17 @@ EOF
     _log PASS "Stack '$stack_name' created at ${stack_dir}"
 }
 
-stack_modify() {
+stack_rename() {
     local old_name; old_name="$(_require_name "${1:-}")"
     local new_name; new_name="$(_require_name "${2:-}")"
     local old_dir; old_dir="$(_get_stack_dir "$old_name")"
     local new_dir; new_dir="$(_get_stack_dir "$new_name")"
 
-    _log STEP "stack_modify: renaming '$old_name' -> '$new_name'"
+    _log STEP "stack_rename: renaming '$old_name' -> '$new_name'"
     [[ -d "$old_dir" ]] || _log EXIT "Stack '$old_name' not found at $old_dir"
     [[ -d "$new_dir" ]] && _log EXIT "Stack '$new_name' already exists at $new_dir"
 
-    _log STEP "stack_modify: moving $old_dir -> $new_dir"
+    _log STEP "stack_rename: moving $old_dir -> $new_dir"
     mv "$old_dir" "$new_dir"
     _log PASS "Stack '$old_name' renamed to '$new_name'."
 }
@@ -370,7 +372,7 @@ stack_backup() {
 
     local ts backup_dir backup_file
     ts="$(date +%Y%m%d_%H%M%S)"
-    backup_dir="${csm_backup}/${stack_name}"
+    backup_dir="${csm_backups}/${stack_name}"
     backup_file="${backup_dir}/${stack_name}_${ts}.tar.gz"
 
     _log STEP "stack_backup: creating $backup_dir"
@@ -721,6 +723,8 @@ secret_create() {
 secret_remove() {
     local name="$1"
     local secret_file="${csm_secrets}/${name}.secret"
+    _log STEP "secret_remove: checking swarm status..."
+    _detect_swarm || _log EXIT "Swarm must be active to remove Docker secrets."
     _log STEP "secret_remove: name=$name, file=$secret_file"
     [[ -n "$name" ]] || _log EXIT "Secret name is required."
     _confirm_no "Remove Docker secret '$name' and backup file?" || { _log INFO "Cancelled."; return 0; }
@@ -743,6 +747,8 @@ secret_remove() {
 }
 
 secret_list() {
+    _log STEP "secret_list: checking swarm status..."
+    _detect_swarm || _log EXIT "Swarm must be active to manage Docker secrets."
     _log STEP "secret_list: checking swarm status..."
     if ! _detect_swarm; then
         _log EXIT "Swarm must be active to list Docker secrets."
@@ -769,7 +775,7 @@ stack_list() {
     _log STEP "stack_list: scanning for stacks..."
     while IFS= read -r -d '' stack_dir; do
         local dir_name; dir_name="$(basename "$stack_dir")"
-        if [[ -f "${stack_dir}/compose.yml" || -f "${stack_dir}/docker-compose.yml" ]]; then
+        if [[ -f "${stack_dir}/compose.yml" || -f "${stack_dir}/docker-compose.yml" || -f "${stack_dir}/podman-compose.yml" ]]; then
             valid_stacks+=("$dir_name")
             _log STEP "stack_list: found valid stack: $dir_name"
         else
@@ -953,31 +959,42 @@ stack_cd() {
     echo "$stack_dir"
 }
 
+_run_net_list() {
+    _log STEP "_run_net_list: listing networks"
+    printf "%s%-30s %-10s %-10s %s%s\n" "${bld}" "NAME" "DRIVER" "SCOPE" "ID" "${rst}"
+    $csm_cmd network ls --format "{{.Name}}\t{{.Driver}}\t{{.Scope}}\t{{.ID}}" | sort | column -ts $'\t'
+}
+
 net_info() {
     local action="${1:-list}"
+    local target="${2:-${csm_net_name}}"
+
     _log STEP "net_info: action=$action"
+
     case "$action" in
-        list)
-            _log STEP "net_info: listing networks"
-            printf "%s%-30s %-10s %-10s %s%s\n" \
-                "${bld}" "NAME" "DRIVER" "SCOPE" "ID" "${rst}"
-            $csm_cmd network ls \
-                --format "{{.Name}}\t{{.Driver}}\t{{.Scope}}\t{{.ID}}" | \
-                sort | column -ts $'\t'
-            ;;
-        host)
+        h|host)
             _log STEP "net_info: detecting host IP"
             printf "Host IP : %s\n" \
                 "$(curl -fsSL ifconfig.me 2>/dev/null || echo 'unavailable')"
             ;;
-        inspect)
-            local net="${2:-${csm_net_name}}"
-            _log STEP "net_info: inspecting network $net"
-            $csm_cmd network inspect "$net"
+        i|inspect)
+            _log STEP "net_info: inspecting network $target"
+            $csm_cmd network inspect "$target"
+            ;;
+        ls|list)
+            # Explicit list call
+            _run_net_list
             ;;
         *)
-            _log FAIL "Unknown net action: $action  (use: list | host | inspect [name])"
-            return 1
+            # This handles both the default "list" and "mis-typed" entries
+            _run_net_list
+
+            # If the action wasn't empty/list, it was a typo
+            if [[ "$action" != "list" ]]; then
+                _log WARN "Unknown net action: $action"
+                _log INFO "Available: h|host, i|inspect [name], ls|list"
+                return 1
+            fi
             ;;
     esac
 }
@@ -986,30 +1003,30 @@ net_info() {
 # 7. CONFIG MANAGEMENT (public)
 # =============================================================================
 
-manage_configs() {
+manage_config() {
     local action="${1:-show}"
     shift || true
-    _log STEP "manage_configs: action=$action"
+    _log STEP "manage_config: action=$action"
     case "$action" in
         show)
             _log INFO "Active configuration:"
             printf "  %-28s = %s\n" \
-                "csm_dir"      "$csm_dir"   \
-                "csm_backup"   "$csm_backup"   \
-                "csm_common"   "$csm_common"   \
-                "csm_configs"  "$csm_configs"  \
-                "csm_secrets"  "$csm_secrets"  \
-                "csm_net_name" "$csm_net_name" \
-                "csm_cmd"      "${csm_cmd:-<not detected>}"
+                "csm_cmd:"      "${csm_cmd:-<not detected>}" \
+                "csm_dir:"      "$csm_dir"   \
+                "csm_backups:"  "$csm_backups"  \
+                "csm_configs:"  "$csm_configs"  \
+                "csm_modules:"  "$csm_modules"  \
+                "csm_secrets:"  "$csm_secrets"  \
+                "csm_net_name:" "$csm_net_name" \
             ;;
         edit)
             local ucfg="${csm_configs}/user.conf"
-            _log STEP "manage_configs: editing $ucfg"
+            _log STEP "manage_config: editing $ucfg"
             [[ ! -f "$ucfg" ]] && { mkdir -p "$csm_configs"; touch "$ucfg"; }
             "${EDITOR:-vi}" "$ucfg"
             ;;
         reload)
-            _log STEP "manage_configs: reloading config..."
+            _log STEP "manage_config: reloading config..."
             _load_config
             _log PASS "Configuration reloaded."
             ;;
@@ -1024,30 +1041,30 @@ manage_configs() {
 # 8. TEMPLATE MANAGEMENT (public, stub)
 # =============================================================================
 
-manage_template() {
-    _log WARN "The 'templates' command is not yet implemented."
-    _log WARN "When released, it will list available templates from"
+manage_module() {
+    _log WARN "The 'modules' command is not yet implemented."
+    _log WARN "When released, it will list available modules from"
     _log WARN "https://codeberg.com/techtinker/homelab and allow you to"
-    _log WARN "download and run a template to install an app stack."
+    _log WARN "download and run a module to install an app stack."
 
-    ##TODO: possible start to template management function code
+    ##TODO: possible start to module management function code
     # local action="${1:-list}"
     # shift || true
     # case "$action" in
     #     list)
-    #         local tdir="${csm_template}"
-    #         [[ -d "$tdir" ]] || { log WARN "No templates directory: $tdir"; return 0; }
-    #         log INFO "Available templates:"
+    #         local tdir="${csm_modules}"
+    #         [[ -d "$tdir" ]] || { log WARN "No modules directory: $tdir"; return 0; }
+    #         log INFO "Available modules:"
     #         find "$tdir" -mindepth 1 -maxdepth 1 -type d | sort | \
     #             while IFS= read -r t; do
     #                 printf "  %s%s%s\n" "${cyn}" "$(basename "$t")" "${rst}"
     #             done
     #         ;;
     #     add|remove|update)
-    #         log WARN "template $action: not yet implemented."
+    #         log WARN "module $action: not yet implemented."
     #         ;;
     #     *)
-    #         log FAIL "Unknown template action: $action  (use: list | add | remove | update)"
+    #         log FAIL "Unknown module action: $action  (use: list | add | remove | update)"
     #         return 1
     #         ;;
     # esac
@@ -1064,12 +1081,12 @@ _print_aliases() {
 
 # Check host and container IPs
 hostip() { echo "Host IP: \$(wget -qO- ifconfig.me)"; }
-lancheck() { echo "Container IP: \$(docker container exec -it "\${*}" wget -qO- ipinfo.io)"; }
-vpncheck() { echo "Container IP: \$(docker container exec -it "\${*}" wget -qO- ipinfo.io/ip)" && \\
+lancheck() { echo "Container IP: \$(${csm_cmd} container exec -it "\${*}" wget -qO- ipinfo.io)"; }
+vpncheck() { echo "Container IP: \$(${csm_cmd} container exec -it "\${*}" wget -qO- ipinfo.io/ip)" && \\
             echo "     Host IP: \$(wget -qO- ifconfig.me)"; }
 
 # cd into stacks directory or a specific stack
-alias dcd='cd ${csm_dir}'
+alias cds='cd ${csm_dir}'
 ALIAS
 }
 
@@ -1110,8 +1127,8 @@ ${bld}Information:${rst}
     g  | logs     <n> [lines]   Follow logs (default: last 50 lines)
     cd            <n>           Print the stack directory path
     ps                          List all containers (formatted)
-    net           <action>      Network info: list | host | inspect [name]
-    t  | template               Template management (not yet implemented)
+    net           <action>      Network info: h|host | i|inspect [name] | l|list
+    t  | module               Template management (not yet implemented)
 
 ${bld}Config:${rst}
     cfg | config  show | edit | reload
@@ -1157,9 +1174,9 @@ main() {
 
     _log STEP "Dispatching command: '$cmd'"
     case "$cmd" in
-        c|create)       stack_create    "$@" ;;
+        c|create|new)   stack_create    "$@" ;;
         e|edit)         stack_edit      "$@" ;;
-        m|modify)       stack_modify    "$@" ;;
+        r|rename)       stack_rename    "$@" ;;
         bu|backup)      stack_backup    "$@" ;;
         dt|delete)      stack_delete    "$@" ;;
         rm|remove)      stack_remove    "$@" ;;
@@ -1169,7 +1186,7 @@ main() {
         b|bounce)       stack_bounce    "$@" ;;
         st|start)       stack_start     "$@" ;;
         sp|stop)        stack_stop      "$@" ;;
-        r|rs|restart)   stack_restart   "$@" ;;
+        rs|restart)     stack_restart   "$@" ;;
         rc|recreate)    stack_recreate  "$@" ;;
         ud|update)      stack_update    "$@" ;;
         i|inspect)      stack_inspect   "$@" ;;
@@ -1180,8 +1197,8 @@ main() {
         cd)             stack_cd        "$@" ;;
         ps)             stack_ps             ;;
         net)            net_info        "$@" ;;
-        cfg|config)     manage_configs  "$@" ;;
-        t|template)     manage_template "$@" ;;
+        cfg|config)     manage_config   "$@" ;;
+        m|module)       manage_module   "$@" ;;
         secret)         secret_create   "$@" ;;
         secret-rm)      secret_remove   "$@" ;;
         secret-ls)      secret_list          ;;

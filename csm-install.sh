@@ -20,14 +20,14 @@ fi
 #   5.  Check / create the docker user + group (UID/GID 2000, Docker only)
 #   6.  Create the CSM directory structure with correct permissions
 #   7.  Install core CSM files
-#   8.  Create ~/stacks symlink pointing to CSM_ROOT_DIR
-#   9.  Symlink /usr/local/bin/csm → CSM_ROOT_DIR/csm.sh
+#   8.  Create ~/stacks symlink pointing to CSM_DIR
+#   9.  Symlink /usr/local/bin/csm → CSM_DIR/.configs/csm.sh
 #  10.  Set final ownership
 # =============================================================================
 
 set -euo pipefail
 
-readonly INSTALLER_VERSION="1.1.0"
+readonly INSTALLER_VERSION="0.2.0"
 
 _runtime=""   # set by _detect_container_runtime or _install_container_runtime
 
@@ -108,12 +108,11 @@ readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && p
 # 3. CONFIGURATION  (override via env vars before calling the script)
 # =============================================================================
 
-export CSM_ROOT_DIR="${CSM_ROOT_DIR:-/srv/stacks}"
-csm_stacks="${CSM_STACKS_DIR:-${CSM_ROOT_DIR}}"
-csm_backup="${CSM_BACKUP_DIR:-${CSM_ROOT_DIR}/.backup}"
-csm_common="${CSM_COMMON_DIR:-${CSM_ROOT_DIR}/.common}"
-csm_configs="${CSM_CONFIGS_DIR:-${csm_common}/configs}"
-csm_secrets="${CSM_SECRETS_DIR:-${csm_common}/secrets}"
+export csm_dir="${CSM_ROOT_DIR:-/srv/stacks}"
+export csm_backups="${CSM_BACKUPS_DIR:-${csm_dir}/.backups}"
+export csm_configs="${CSM_CONFIGS_DIR:-${csm_dir}/.configs}"
+export csm_modules="${CSM_MODULES_DIR:-${csm_dir}/.modules}"
+export csm_secrets="${CSM_SECRETS_DIR:-${csm_dir}/.secrets}"
 
 # Owner — when run via sudo, use the invoking user; else current user
 csm_owner="${SUDO_USER:-$(id -un)}"
@@ -121,26 +120,26 @@ csm_group="docker"   # default, overridden after runtime detection
 csm_uid="${SUDO_UID:-$(id -u)}"
 csm_gid=2000         # default, overridden by _create_runtime_group
 
-readonly link_path="${HOME}/stacks"
+readonly csm_link="${HOME}/stacks"
 readonly bin_link="/usr/local/bin/csm"
 
 # Permission modes (symbolic form — compatible with GNU and BSD install)
-readonly mode_dir="775"    # directories: rwxrwxr-x
-readonly mode_exec="770"   # executables: rwxrwx---
-readonly mode_conf="660"   # config files: rw-rw----
-readonly mode_auth="600"   # secrets:      rw-------
+readonly mode_dir="775"  # directories:  rwxrwxr-x
+readonly mode_exec="770" # executables:  rwxrwx---
+readonly mode_conf="660" # config files: rw-rw----
+readonly mode_auth="600" # secret files: rw-------
 
 # Files to install: source → destination directory
 declare -A files_to_install=(
-    ["${script_dir}/csm.sh"]="${CSM_ROOT_DIR}/"
-    ["${script_dir}/csm-install.sh"]="${csm_common}/"
+    ["${script_dir}/csm.sh"]="${csm_configs}/"
+    ["${script_dir}/csm-install.sh"]="${csm_configs}/"
 )
 # example.conf → default.conf (only if default.conf doesn't already exist)
 [[ -f "${script_dir}/example.conf" ]] && \
     files_to_install["${script_dir}/example.conf"]="${csm_configs}/"
 # example.env is optional
 [[ -f "${script_dir}/example.env" ]] && \
-    files_to_install["${script_dir}/example.env"]="${csm_common}/"
+    files_to_install["${script_dir}/example.env"]="${csm_configs}/"
 
 # =============================================================================
 # 4. PLATFORM DETECTION
@@ -200,6 +199,7 @@ _detect_container_runtime() {
     elif command -v podman >/dev/null 2>&1; then
         _log PASS "Podman found: $(podman --version)"
         _runtime="podman"
+        csm_group="podman"
         _log STEP "_detect_container_runtime: podman detected"
         return 0
     fi
@@ -302,16 +302,16 @@ _check_container_service() {
 # =============================================================================
 
 _create_runtime_group() {
-    local gid=2000
-    _log STEP "_create_runtime_group: checking if group '$csm_group' (GID $gid) exists..."
+    local lgid=${csm_gid:-2000}
+    _log STEP "_create_runtime_group: checking if group '$csm_group' (GID $lgid) exists..."
 
-    if ! getent group "$gid" >/dev/null 2>&1; then
+    if ! getent group "$lgid" >/dev/null 2>&1; then
         _log STEP "_create_runtime_group: creating group..."
-        $var_sudo groupadd -g "$gid" "$csm_group" \
-            && _log INFO "Created group '$csm_group' (GID $gid)" \
+        $var_sudo groupadd -g "$lgid" "$csm_group" \
+            && _log INFO "Created group '$csm_group' (GID $lgid)" \
             || _die "Failed to create group '$csm_group'"
     else
-        _log INFO "Group '$csm_group' (GID $gid) already exists."
+        _log INFO "Group '$csm_group' (GID $lgid) already exists."
     fi
 
     # Use the actual GID (may differ if group already existed with different GID)
@@ -359,14 +359,13 @@ _install_file() {
 }
 
 _setup_directories() {
-    _log STEP "_setup_directories: creating structure under ${CSM_ROOT_DIR}..."
-    _install_dir "$CSM_ROOT_DIR" "$mode_dir"
-    _install_dir "$csm_backup"   "$mode_dir"
-    _install_dir "$csm_common"   "$mode_dir"
-    _install_dir "$csm_stacks"   "$mode_dir"
-    _install_dir "$csm_configs"  "$mode_dir"
-    _install_dir "$csm_secrets"  "$mode_dir"
-    _log STEP "_setup_directories: done"
+    _log STEP "_setup_directories: creating structure under ${csm_dir}..."
+    _install_dir "$csm_dir"     "$mode_dir"
+    _install_dir "$csm_backups" "$mode_dir"
+    _install_dir "$csm_configs" "$mode_dir"
+    _install_dir "$csm_modules" "$mode_dir"
+    _install_dir "$csm_secrets" "$mode_dir"
+    _log INFO "_setup_directories: done"
 }
 
 _setup_files() {
@@ -377,24 +376,26 @@ _setup_files() {
         [[ "$src" == *.conf ]] && mode="$mode_conf" || mode="$mode_exec"
         _install_file "$src" "$dest_dir" "$mode"
     done
-
-    # Rename example.conf → default.conf (only on fresh install)
-    local example_conf="${csm_configs}/example.conf"
-    local default_conf="${csm_configs}/default.conf"
-    if [[ -f "$example_conf" && ! -f "$default_conf" ]]; then
-        _log STEP "_setup_files: renaming example.conf → default.conf"
-        $var_sudo mv "$example_conf" "$default_conf"
-        _log INFO "Renamed example.conf → default.conf"
+    local conf_example="${csm_configs}/example.conf"
+    local conf_default="${csm_configs}/default.conf"
+    local conf_user="${csm_configs}/user.conf"
+    if [[ -f "$conf_example" && ! -f "$conf_default" ]]; then
+        _log STEP "_setup_files: creating $conf_default"
+        $var_sudo cp "$conf_example" "$conf_default"
+        _log INFO "Copied $conf_example → $conf_default"
     fi
-
-    # Patch detected runtime values into default.conf
-    if [[ -f "$default_conf" ]]; then
+    if [[ -f "$conf_default" ]]; then
         _log STEP "_setup_files: patching CSM_CONTAINER_RUNTIME=${_runtime} and CSM_STACKS_GID=${csm_gid} into default.conf"
-        sed -i "s/^CSM_CONTAINER_RUNTIME=.*/CSM_CONTAINER_RUNTIME=${_runtime}/" "$default_conf"
-        sed -i "s/^CSM_STACKS_GID=.*/CSM_STACKS_GID=${csm_gid}/" "$default_conf"
+        sed -i "s/^CSM_CONTAINER_RUNTIME=.*/CSM_CONTAINER_RUNTIME=${_runtime}/" "$conf_default"
+        sed -i "s/^CSM_STACKS_GID=.*/CSM_STACKS_GID=${csm_gid}/" "$conf_default"
         _log INFO "Patched CSM_CONTAINER_RUNTIME=${_runtime} and CSM_STACKS_GID=${csm_gid} into default.conf"
     fi
-    _log STEP "_setup_files: done"
+    if [[ -f "$conf_default" && ! -f "$conf_user" ]]; then
+        _log STEP "_setup_files: creating $conf_user"
+        $var_sudo cp "$conf_default" "$conf_user"
+        _log INFO "Copied $conf_default → $conf_user"
+    fi
+    _log INFO "_setup_files: done"
 }
 
 # =============================================================================
@@ -404,33 +405,34 @@ _setup_files() {
 _setup_symlinks() {
     _log STEP "_setup_symlinks: setting up symlinks..."
 
-    # ~/stacks  → CSM_ROOT_DIR
-    local target_dir="$CSM_ROOT_DIR"
-    _log STEP "_setup_symlinks: checking ~/stacks symlink ($link_path → $target_dir)"
-    if [[ ! -e "$link_path" && ! -L "$link_path" ]]; then
-        _log STEP "_setup_symlinks: creating symlink $link_path → $target_dir"
-        ln -s "$target_dir" "$link_path"
-        _log INFO "Created symlink: $link_path → $target_dir"
-    elif [[ -L "$link_path" ]]; then
+    # ~/stacks  → csm_dir
+    local link_target="$csm_dir"
+    local link_source="$csm_link"
+    _log STEP "_setup_symlinks: checking ~/stacks symlink ($link_source → $link_target)"
+    if [[ ! -e "$link_source" && ! -L "$link_source" ]]; then
+        _log STEP "_setup_symlinks: creating symlink $link_source → $link_target"
+        ln -s "$link_target" "$link_source"
+        _log INFO "Created symlink: $link_source → $link_target"
+    elif [[ -L "$link_source" ]]; then
         local current_target
-        current_target="$(readlink "$link_path")"
-        if [[ "$current_target" != "$target_dir" ]]; then
-            _log WARN "Symlink $link_path points to $current_target (expected $target_dir)"
-            _confirm_no "Update symlink to point to $target_dir?" && {
-                _log STEP "_setup_symlinks: updating symlink $link_path"
-                rm -f "$link_path"
-                ln -s "$target_dir" "$link_path"
+        current_target="$(readlink "$link_source")"
+        if [[ "$current_target" != "$link_target" ]]; then
+            _log WARN "Symlink $link_source points to $current_target (expected $link_target)"
+            _confirm_no "Update symlink to point to $link_target?" && {
+                _log STEP "_setup_symlinks: updating symlink $link_source"
+                rm -f "$link_source"
+                ln -s "$link_target" "$link_source"
                 _log INFO "Symlink updated."
             }
         else
-            _log PASS "Symlink $link_path is correct."
+            _log PASS "Symlink $link_source is correct."
         fi
     else
-        _log WARN "$link_path exists and is not a symlink – leaving it alone."
+        _log WARN "$link_source exists and is not a symlink – leaving it alone."
     fi
 
-    # /usr/local/bin/csm  → CSM_ROOT_DIR/csm.sh
-    local csm_bin="${CSM_ROOT_DIR}/csm.sh"
+    # /usr/local/bin/csm  → csm_configs/csm.sh
+    local csm_bin="${csm_configs}/csm.sh"
     _log STEP "_setup_symlinks: checking $bin_link → $csm_bin"
     if [[ ! -e "$bin_link" && ! -L "$bin_link" ]]; then
         _log STEP "_setup_symlinks: creating symlink $bin_link → $csm_bin"
@@ -441,28 +443,28 @@ _setup_symlinks() {
     else
         _log WARN "$bin_link exists and is not a symlink – leaving it alone."
     fi
-    _log STEP "_setup_symlinks: done"
+    _log INFO "_setup_symlinks: done"
 }
 
 _set_ownership() {
-    _log STEP "_set_ownership: setting group on ${CSM_ROOT_DIR} to ${csm_group}..."
+    _log STEP "_set_ownership: setting group on ${csm_dir} to ${csm_group}..."
     local current_group
-    current_group="$(_get_group "$CSM_ROOT_DIR")"
+    current_group="$(_get_group "$csm_dir")"
     _log STEP "_set_ownership: current group=$current_group, target=$csm_group"
     [ "$current_group" != "$csm_group" ] && {
-        _log STEP "_set_ownership: running chgrp $csm_group $CSM_ROOT_DIR"
-        $var_sudo chgrp "$csm_group" "$CSM_ROOT_DIR"
+        _log STEP "_set_ownership: running chgrp $csm_group $csm_dir"
+        $var_sudo chgrp "$csm_group" "$csm_dir"
     }
     local current_perms
-    current_perms="$(_get_perms "$CSM_ROOT_DIR")"
+    current_perms="$(_get_perms "$csm_dir")"
     local sgid_bit
     sgid_bit="$(echo "$current_perms" | cut -c6)"
     _log STEP "_set_ownership: current perms=$current_perms, sgid bit=$sgid_bit"
     [ "$sgid_bit" != "s" ] && {
-        _log STEP "_set_ownership: running chmod g+s $CSM_ROOT_DIR"
-        $var_sudo chmod g+s "$CSM_ROOT_DIR"
+        _log STEP "_set_ownership: running chmod g+s $csm_dir"
+        $var_sudo chmod g+s "$csm_dir"
     }
-    _log STEP "_set_ownership: done"
+    _log INFO "_set_ownership: done"
 }
 
 # =============================================================================
@@ -470,17 +472,14 @@ _set_ownership() {
 # =============================================================================
 
 main() {
-    _log STEP "CSM Installer v${INSTALLER_VERSION} – starting"
-    _log STEP "main: CSM_ROOT_DIR=$CSM_ROOT_DIR, csm_owner=$csm_owner, csm_uid=$csm_uid"
-    _log INFO "Install root: ${CSM_ROOT_DIR}"
+    _log INFO "CSM Installer v${INSTALLER_VERSION} – starting"
+    _log INFO "Install root: ${csm_dir}"
     _log INFO "Invoking user: ${csm_owner} (UID ${csm_uid})"
 
     _log STEP "main: detecting package manager..."
     _detect_pkg_manager
     _log STEP "main: detecting/installing container runtime..."
     _install_container_runtime
-    _log STEP "main: runtime=$_runtime"
-    [[ "$_runtime" == "podman" ]] && csm_group="podman"
     _log STEP "main: checking container service..."
     _check_container_service
     _log STEP "main: creating runtime group..."
@@ -498,7 +497,7 @@ main() {
     _log PASS "CSM installation complete!"
     _log INFO "Next steps:"
     _log INFO "  1. Edit user config : ${csm_configs}/user.conf"
-    _log INFO "  2. View your stacks : ${csm_stacks}/"
+    _log INFO "  2. View your stacks : ${csm_dir}/"
     _log INFO "  3. Get started      : csm --help"
     [[ "$_runtime" == "docker" ]] && [[ "$(groups)" != *docker* ]] && \
         _log WARN "Remember to log out and back in so your docker group membership takes effect."
