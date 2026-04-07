@@ -40,6 +40,7 @@ set -euo pipefail
 readonly CSM_VERSION="0.2.3"
 readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
+csm_debug="1" # set to "1" to display debug step messages
 csm_cmd=""    # set by _detect_command
 scope=""      # set by _detect_scope
 
@@ -48,8 +49,6 @@ readonly mode_dirs="775"    # directories: rwxrwxr-x
 readonly mode_exec="770"   # executables: rwxrwx---
 readonly mode_conf="660"   # config files: rw-rw----
 readonly mode_auth="600"   # secrets:      rw-------
-
-local CSM_DEBUG="1"
 
 # =============================================================================
 # 1. HELPER FUNCTIONS
@@ -96,7 +95,7 @@ _log() {
         FAIL) printf "%s FAIL >> %s%s\n" "${red}${bld}" "${message}" "${rst}" >&2 ;;
         INFO) printf "%s INFO >> %s%s\n" "${cyn}${bld}" "${message}" "${rst}" ;;
         PASS) printf "%s PASS >> %s%s\n" "${grn}${bld}" "${message}" "${rst}" ;;
-        STEP) [[ "${CSM_DEBUG:-0}" == "1" ]] && printf "%s STEP >> %s%s\n" "${mgn}${bld}" "${message}" "${rst}" ;;
+        STEP) [[ "${csm_debug:-0}" == "1" ]] && printf "%s STEP >> %s%s\n" "${mgn}${bld}" "${message}" "${rst}" ;;
         WARN) printf "%s WARN >> %s%s\n" "${ylw}${bld}" "${message}" "${rst}" >&2 ;;
         *)    printf "%s WARN >> _log: unknown level '%s'%s\n" "${ylw}${bld}" "${level}" "${rst}" >&2 ;;
     esac
