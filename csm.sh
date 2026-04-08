@@ -37,7 +37,7 @@
 
 set -euo pipefail
 
-readonly CSM_VERSION="0.2.3"
+readonly CSM_VERSION="0.2.4"
 readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 csm_debug="1" # set to "1" to display debug step messages
@@ -74,19 +74,6 @@ _color_setup() {
         wht="" blk="" bld="" uln="" rst=""
     fi
 }
-
-##TODO: try to fix this BUG! - passing a variable as stdout prints the literal var, not redirecting output
-# log()
-#     local level="${1:-STEP}" message="${2:-}" color="${rst}" output=""
-#     case "$level" in
-#         FAIL) color="${red}"; output=">&2" ;;
-#         WARN) color="${ylw}"; output=">&2" ;;
-#         INFO) color="${cyn}" ;;
-#         PASS) color="${grn}" ;;
-#         *)    color="${blu}" ;;
-#     esac
-#     printf "%s >> %s %s\n" "${color}${bld}${level}" "${rst}${message}${rst}" "${output}"
-# }
 
 _log() {
     local level="${1:-INFO}" message="${2:-}"
@@ -143,41 +130,35 @@ _detect_swarm() {
 
 _detect_scope() {
     local stack_name="$1"
-    local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
-    local f; f="${stack_dir}/compose.yml"
+    local stack_dir="$(_get_stack_dir "$stack_name")"
 
     _log STEP "_detect_scope: stack_name=$stack_name, stack_dir=$stack_dir"
 
-    # Podman has no swarm — always local
+    # 1. Podman has no swarm — always local
     [[ "$csm_cmd" == "podman" ]] && { _log STEP "_detect_scope: podman -> local"; scope="local"; return; }
 
-    # Explicit marker files still override auto-detect
-    [[ -f "${stack_dir}/.swarm" ]] && { _log STEP "_detect_scope: .swarm marker found -> swarm"; scope="swarm"; return; }
+    # 2. Explicit marker files override auto-detect
     [[ -f "${stack_dir}/.local" ]] && { _log STEP "_detect_scope: .local marker found -> local"; scope="local"; return; }
+    [[ -f "${stack_dir}/.swarm" ]] && { _log STEP "_detect_scope: .swarm marker found -> swarm"; scope="swarm"; return; }
 
-    # Swarm inactive — always local
+    # 3. Swarm inactive — always local
     _detect_swarm || { _log STEP "_detect_scope: swarm inactive -> local"; scope="local"; return; }
 
-    # Swarm active — is this stack already deployed to it?
+    # 4. Swarm active — is this stack already deployed to it?
     if docker stack ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qw "$stack_name"; then
         _log STEP "_detect_scope: stack found in swarm ls -> swarm"
         scope="swarm"
         return
     fi
 
-    # check compose file for swarm-specific syntax
-    if [[ -f "$f" ]]; then
-        if grep -qE '^\s+mode:\s+(global|replicated)' "$f" 2>/dev/null \
-            || grep -qE '^\s+endpoint_mode:' "$f" 2>/dev/null \
-            || grep -qE '^\s+placement:' "$f" 2>/dev/null \
-            || grep -qE '^\s+deploy:' "$f" 2>/dev/null; then
-            _log STEP "_detect_scope: swarm syntax detected in compose.yml -> swarm"
-            scope="swarm"
-            return
-        fi
+    # 5. Ingress network check (replaces compose parsing)
+    if docker network inspect ingress >/dev/null 2>&1; then
+        _log STEP "_detect_scope: ingress network found -> swarm"
+        scope="swarm"
+        return
     fi
 
-    # Default to local
+    # 6. Default fallback
     _log STEP "_detect_scope: default -> local"
     scope="local"
 }
@@ -305,17 +286,39 @@ _del_safe() {
 
 stack_create() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
+    local user_scope="${2:-}"
+    local target_scope="local"
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
-    local env_file="${csm_configs}/.docker.env"
 
-    _log STEP "stack_create: name=$stack_name, dir=$stack_dir"
+    # 1. Determine Target Scope
+    _log STEP "stack_create: determining target scope..."
+    if [[ -n "$user_scope" ]]; then
+        target_scope="$user_scope"
+    elif docker network inspect ingress >/dev/null 2>&1; then
+        _log STEP "stack_create: ingress network found, defaulting to swarm"
+        target_scope="swarm"
+    fi
+
+    local tmpl_compose="$csm_configs/${target_scope}-compose.yml"
+    local tmpl_env="$csm_configs/.${target_scope}.env"
+
+    _log STEP "stack_create: name=$stack_name, dir=$stack_dir, scope=$target_scope"
     [[ -d "$stack_dir" ]] && _log EXIT "Stack '$stack_name' already exists at $stack_dir"
 
     _log STEP "stack_create: creating directories..."
-    mkdir -p "${stack_dir}/appdata"
+    mkdir -p "$stack_dir/appdata"
     install -o "$csm_uid" -g "$csm_gid" -m "$mode_dirs" -d "$stack_dir"
-    _log STEP "stack_create: writing compose.yml"
-    cat > "${stack_dir}/compose.yml" <<EOF
+
+    # 2. Handle Compose File
+    if [[ -f "$tmpl_compose" ]]; then
+        _log STEP "stack_create: copying template $tmpl_compose"
+        install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$tmpl_compose" "$stack_dir/compose.yml"
+
+        # Inject the dynamic network name into the static template
+        sed -i "s/CSM_NETWORK_PLACEHOLDER/${csm_net_name}/g" "$stack_dir/compose.yml"
+    else
+        _log WARN "Template not found: $tmpl_compose. Falling back to internal boilerplate."
+        cat > "${stack_dir}/compose.yml" <<EOF
 networks:
   default:
     external:
@@ -323,23 +326,26 @@ networks:
 
 services:
   # Add your service definitions here
-  # example:
-  #   image: nginx:alpine
-  #   restart: unless-stopped
 EOF
+    fi
 
-    if [[ -f "$env_file" ]]; then
-        _log STEP "stack_create: linking env from $env_file"
-        ln -s "$env_file" "${stack_dir}/.env"
+    # 3. Handle Env File
+    if [[ -f "$tmpl_env" ]]; then
+        _log STEP "stack_create: copying env template $tmpl_env"
+        install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$tmpl_env" "$stack_dir/.env"
     else
-        _log STEP "stack_create: creating empty .env"
+        _log STEP "stack_create: no template found, creating empty .env"
         : > "${stack_dir}/.env"
     fi
 
     _log STEP "stack_create: fixing permissions"
     _fix_permissions "$stack_name"
 
-    _log PASS "Stack '$stack_name' created at ${stack_dir}"
+    # 4. Lock in the scope with a marker file
+    _log STEP "stack_create: dropping .$target_scope marker file"
+    touch "$stack_dir/.$target_scope"
+
+    _log PASS "Stack '$stack_name' created at ${stack_dir} [Scope: $target_scope]"
 }
 
 stack_rename() {
@@ -832,7 +838,7 @@ stack_list() {
         echo ""
         _log WARN "Directories missing a compose file (empty or broken):"
         for dir_name in "${empty_dirs[@]}"; do
-            printf "  %s%-24s%s [  %s%s%s  ]\n" \
+            printf "  %s%-24s%s [ %s%s%s ]\n" \
                 "${wht}" "$dir_name" "${rst}" \
                 "${red}" "empty" "${rst}"
         done
