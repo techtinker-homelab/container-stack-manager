@@ -29,7 +29,10 @@ set -euo pipefail
 
 readonly INSTALLER_VERSION="0.2.4"
 
-_runtime=""   # set by _detect_container_runtime or _install_container_runtime
+force_install=0
+uninstall_mode=0
+
+csm_runtime=""   # set by _detect_container_runtime or _install_container_runtime
 
 # =============================================================================
 # 0. HELPERS
@@ -73,12 +76,14 @@ _log() {
 _die()     { _log FAIL "$1"; exit 1; }
 
 _confirm_yes() {
+    [[ "$force_install" == 1 ]] && return 0
     local prompt="${1:-Are you sure?}"
     read -r -p "${ylw}${bld} ${prompt} [Y/n]: ${rst}" reply
     [[ -z "${reply}" || "${reply,,}" == "y" ]]
 }
 
 _confirm_no() {
+    [[ "$force_install" == 1 ]] && return 0
     local prompt="${1:-Are you sure?}"
     read -r -p "${ylw}${bld}  ${prompt} [y/N]: ${rst}" reply
     [[ "${reply,,}" == "y" ]]
@@ -192,12 +197,12 @@ _get_perms() {
 _detect_container_runtime() {
     if command -v docker >/dev/null 2>&1; then
         _log PASS "Docker found: $(docker --version)"
-        _runtime="docker"
+        csm_runtime="docker"
         _log STEP "_detect_container_runtime: docker detected"
         return 0
     elif command -v podman >/dev/null 2>&1; then
         _log PASS "Podman found: $(podman --version)"
-        _runtime="podman"
+        csm_runtime="podman"
         csm_group="podman"
         _log STEP "_detect_container_runtime: podman detected"
         return 0
@@ -215,14 +220,14 @@ _install_docker() {
         || _die "Docker installation failed."
     rm -f /tmp/get-docker.sh
     _log PASS "Docker installed: $(docker --version)"
-    _runtime="docker"
+    csm_runtime="docker"
 }
 
 _install_podman() {
     _log STEP "_install_podman: installing via package manager..."
     _install_pkg podman
     _log PASS "Podman installed: $(podman --version)"
-    _runtime="podman"
+    csm_runtime="podman"
 }
 
 _install_container_runtime() {
@@ -253,8 +258,8 @@ _install_container_runtime() {
 # =============================================================================
 
 _check_container_service() {
-    _log STEP "_check_container_service: runtime=$_runtime"
-    case "$_runtime" in
+    _log STEP "_check_container_service: runtime=$csm_runtime"
+    case "$csm_runtime" in
         docker)
             _log STEP "Checking Docker service..."
             if ! command -v systemctl >/dev/null 2>&1; then
@@ -396,33 +401,41 @@ _setup_files() {
     # 1. Install the core script
     _install_file "${script_dir}/csm.sh" "${csm_configs}/" "$mode_exec"
 
-    # 2. Handle Env Templates
+# 2. Handle Env Templates
     if [[ -f "$env_example" ]]; then
         _install_file "$env_example" "${csm_configs}/" "$mode_conf"
-        [[ ! -f "$env_local" ]] && $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$env_example" "$env_local"
-        [[ ! -f "$env_swarm" ]] && $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$env_example" "$env_swarm"
-        _log INFO "Initial setup: Created local and swarm .env templates"
+        if [[ ! -f "$env_local" || "$force_install" == 1 ]]; then
+            $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$env_example" "$env_local"
+        fi
+        if [[ ! -f "$env_swarm" || "$force_install" == 1 ]]; then
+            $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$env_example" "$env_swarm"
+        fi
+        _log INFO "Initial setup: Created/Overwrote local and swarm .env templates"
     fi
 
     # 3. Handle Compose Templates
     if [[ -f "$compose_example" ]]; then
         _install_file "$compose_example" "${csm_configs}/" "$mode_conf"
-        [[ ! -f "$compose_local" ]] && $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$compose_example" "$compose_local"
-        [[ ! -f "$compose_swarm" ]] && $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$compose_example" "$compose_swarm"
-        _log INFO "Initial setup: Created local and swarm compose templates"
+        if [[ ! -f "$compose_local" || "$force_install" == 1 ]]; then
+            $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$compose_example" "$compose_local"
+        fi
+        if [[ ! -f "$compose_swarm" || "$force_install" == 1 ]]; then
+            $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$compose_example" "$compose_swarm"
+        fi
+        _log INFO "Initial setup: Created/Overwrote local and swarm compose templates"
     fi
 
     # 4. Handle Core Configurations
     if [[ -f "$conf_example" ]]; then
         _install_file "$conf_example" "${csm_configs}/" "$mode_conf"
-        if [[ ! -f "$conf_default" ]]; then
+        if [[ ! -f "$conf_default" || "$force_install" == 1 ]]; then
             $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$conf_example" "$conf_default"
-            _log INFO "Initial setup: Created $conf_default"
+            _log INFO "Initial setup: Created/Overwrote $conf_default"
         fi
     fi
-    if [[ -f "$conf_default" && ! -f "$conf_user" ]]; then
+    if [[ -f "$conf_default" ]] && [[ ! -f "$conf_user" || "$force_install" == 1 ]]; then
         $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$conf_default" "$conf_user"
-        _log INFO "Initial setup: Created $conf_user"
+        _log INFO "Initial setup: Created/Overwrote $conf_user"
     fi
 
     # 5. Consolidated Patching Logic
@@ -431,7 +444,7 @@ _setup_files() {
     [[ -f "$conf_user" ]] && targets+=("$conf_user")
     if [[ ${#targets[@]} -gt 0 ]]; then
         _log STEP "_setup_files: patching runtime variables..."
-        sed -i  -e "s|^CSM_CONTAINER_RUNTIME=.*|CSM_CONTAINER_RUNTIME=${_runtime}|" \
+        sed -i  -e "s|^CSM_CONTAINER_RUNTIME=.*|CSM_CONTAINER_RUNTIME=${csm_runtime}|" \
                 -e "s|^CSM_STACKS_GID=.*|CSM_STACKS_GID=${csm_gid}|" \
                 -e "s|^CSM_STACKS_UID=.*|CSM_STACKS_UID=${csm_uid}|" \
                 "${targets[@]}"
@@ -500,11 +513,62 @@ _set_ownership() {
 }
 
 # =============================================================================
-# 11. MAIN
+# 11. UNINSTALL
+# =============================================================================
+
+_uninstall_csm() {
+    _log WARN "Starting CSM uninstallation..."
+    _log INFO "This will remove the core engine and symlinks."
+    _log INFO "Your stacks, user.conf, and templates will NOT be modified."
+
+    _confirm_yes "Proceed with uninstallation?" || { _log INFO "Cancelled."; exit 0; }
+
+    # 1. Remove Symlinks
+    if [[ -L "$bin_link" ]]; then
+        _log STEP "Removing binary symlink: $bin_link"
+        $var_sudo rm -f "$bin_link"
+    fi
+    if [[ -L "$csm_link" ]]; then
+        _log STEP "Removing home directory symlink: $csm_link"
+        rm -f "$csm_link"
+    fi
+
+    # 2. Remove Core Engine Files
+    if [[ -f "${csm_configs}/csm.sh" ]]; then
+        _log STEP "Removing core script: ${csm_configs}/csm.sh"
+        $var_sudo rm -f "${csm_configs}/csm.sh"
+    fi
+    if [[ -f "${csm_configs}/default.conf" ]]; then
+        _log STEP "Removing default config: ${csm_configs}/default.conf"
+        $var_sudo rm -f "${csm_configs}/default.conf"
+    fi
+
+    _log PASS "CSM core files and symlinks have been removed."
+    _log INFO "Note: The container runtime, groups, and ${csm_dir} directories remain intact."
+    exit 0
+}
+
+# =============================================================================
+# 12. MAIN
 # =============================================================================
 
 main() {
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -f|--force)     force_install=1; shift ;;
+            -u|--uninstall) uninstall_mode=1; shift ;;
+            *) _log WARN "Unknown argument: $1"; shift ;;
+        esac
+    done
+
+    # Handle uninstallation
+    if [[ "$uninstall_mode" == 1 ]]; then
+        _uninstall_csm
+    fi
     _log INFO "CSM Installer v${INSTALLER_VERSION} – starting"
+    [[ "$force_install" == 1 ]] && _log WARN "FORCE MODE ACTIVE: Existing configs will be overwritten and prompts bypassed."
+
     _log INFO "Install root: ${csm_dir}"
     _log INFO "Invoking user: ${csm_owner} (UID ${csm_uid})"
 
@@ -531,7 +595,7 @@ main() {
     _log INFO "  1. Edit user config : ${csm_configs}/user.conf"
     _log INFO "  2. View your stacks : ${csm_dir}/"
     _log INFO "  3. Get started      : csm --help"
-    [[ "$_runtime" == "docker" ]] && [[ "$(groups)" != *docker* ]] && \
+    [[ "$csm_runtime" == "docker" ]] && [[ "$(groups)" != *docker* ]] && \
         _log WARN "Remember to log out and back in so your docker group membership takes effect."
 }
 
