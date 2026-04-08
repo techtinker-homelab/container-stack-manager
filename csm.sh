@@ -37,7 +37,7 @@
 
 set -euo pipefail
 
-readonly CSM_VERSION="0.2.4"
+readonly CSM_VERSION="0.2.5"
 readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 csm_debug="1" # set to "1" to display debug step messages
@@ -77,15 +77,19 @@ _color_setup() {
 
 _log() {
     local level="${1:-INFO}" message="${2:-}"
+    local color
     case "$level" in
-        EXIT) printf "%s EXIT >> %s%s\n" "${red}${bld}" "${message}" "${rst}" >&2; exit 1 ;;
-        FAIL) printf "%s FAIL >> %s%s\n" "${red}${bld}" "${message}" "${rst}" >&2 ;;
-        INFO) printf "%s INFO >> %s%s\n" "${cyn}${bld}" "${message}" "${rst}" ;;
-        PASS) printf "%s PASS >> %s%s\n" "${grn}${bld}" "${message}" "${rst}" ;;
-        STEP) [[ "${csm_debug:-0}" == "1" ]] && printf "%s STEP >> %s%s\n" "${mgn}${bld}" "${message}" "${rst}" ;;
-        WARN) printf "%s WARN >> %s%s\n" "${ylw}${bld}" "${message}" "${rst}" >&2 ;;
-        *)    printf "%s WARN >> _log: unknown level '%s'%s\n" "${ylw}${bld}" "${level}" "${rst}" >&2 ;;
+        EXIT|FAIL)  color="${red}" ;;
+        INFO)       color="${cyn}" ;;
+        PASS)       color="${grn}" ;;
+        STEP)       color="${mgn}"; [[ "${csm_debug:-0}" == "1" ]] || return 0 ;;
+        WARN)       color="${ylw}" ;;
+        *)          color="${ylw}"; level="WARN"
+                    message="[Unknown log type: '${level}'] $message"
+                    ;;
     esac
+    printf "%s %-4s >> %s%s\n" "${color}${bld}" "${level}" "${message}" "${rst}" >&2
+    [[ "$level" == "EXIT" ]] && exit 1
 }
 
 _confirm_no() {
