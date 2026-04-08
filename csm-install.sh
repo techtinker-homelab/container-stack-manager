@@ -27,7 +27,7 @@ fi
 
 set -euo pipefail
 
-readonly INSTALLER_VERSION="0.2.3"
+readonly INSTALLER_VERSION="0.2.4"
 
 _runtime=""   # set by _detect_container_runtime or _install_container_runtime
 
@@ -341,72 +341,101 @@ _install_dir() {
         _log STEP "_install_dir: creating $tgt (mode=$mode)"
         $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -d "$tgt"
         _log INFO "Created: $tgt"
-    else
-        _log INFO "Exists:  $tgt"
     fi
 }
 
 _install_file() {
     local src="$1" dest_dir="$2" mode="$3"
+    local filename=$(basename "$src")
+
     if [[ -f "$src" ]]; then
-        _log STEP "_install_file: installing $(basename "$src") → $dest_dir (mode=$mode)"
-        $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" "$src" "$dest_dir/"
-        _log INFO "Installed: $(basename "$src") → $dest_dir"
+        _log STEP "_install_file: installing $filename (mode=$mode)"
+        # -v: verbose, -C: only copy if different, -p: preserve timestamps
+        $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -C -p "$src" "$dest_dir/"
+        _log INFO "Installed: $filename → $dest_dir"
     else
-        _log WARN "Source file missing – skipping: $src"
+        _log WARN "Source file missing: $src"
     fi
 }
 
 _setup_directories() {
-    _log STEP "_setup_directories: creating structure under ${csm_dir}..."
-    _install_dir "$csm_dir"     "$mode_dir"
-    _install_dir "$csm_backups" "$mode_dir"
-    _install_dir "$csm_configs" "$mode_dir"
-    _install_dir "$csm_modules" "$mode_dir"
-    _install_dir "$csm_secrets" "$mode_dir"
+    # Ensure /srv is writable or exists before trying to create /srv/stacks
+    if [[ ! -w "/srv" ]] && [[ ! -d "$csm_dir" ]]; then
+        _log ERROR "Cannot write to /srv. Are you running with sufficient privileges?"
+        return 1
+    fi
+    _log STEP "_setup_directories: initializing structure at ${csm_dir}"
+    local target_dirs=(
+        "$csm_dir"
+        "$csm_backups"
+        "$csm_configs"
+        "$csm_modules"
+        "$csm_secrets"
+    )
+    for dir in "${target_dirs[@]}"; do
+        _install_dir "$dir" "$mode_dir"
+    done
     _log INFO "_setup_directories: done"
 }
 
 _setup_files() {
     _log STEP "_setup_files: installing CSM core files..."
 
-    # 1. Install loop with smart mode detection
-    for src in "${!files_to_install[@]}"; do
-        local dest_dir="${files_to_install[$src]}"
-        local mode="$mode_conf"
-        [[ -d "$src" || "$src" == *.sh ]] && mode="$mode_exec"
-
-        _install_file "$src" "$dest_dir" "$mode"
-    done
-
-    local conf_example="${csm_configs}/example.conf"
+    local conf_example="${script_dir}/example.conf"
     local conf_default="${csm_configs}/default.conf"
     local conf_user="${csm_configs}/user.conf"
 
-    # 2. Handle initial file creation
-    [[ -f "$conf_example" && ! -f "$conf_default" ]] && \
-        $var_sudo cp "$conf_example" "$conf_default" && \
-        _log INFO "Initial setup: Created $conf_default"
+    local compose_example="${script_dir}/example-compose.yml"
+    local compose_local="${csm_configs}/local-compose.yml"
+    local compose_swarm="${csm_configs}/swarm-compose.yml"
 
-    [[ -f "$conf_default" && ! -f "$conf_user" ]] && \
-        $var_sudo cp "$conf_default" "$conf_user" && \
+    local env_example="${script_dir}/example.env"
+    local env_local="${csm_configs}/.local.env"
+    local env_swarm="${csm_configs}/.swarm.env"
+
+    # 1. Install the core script
+    _install_file "${script_dir}/csm.sh" "${csm_configs}/" "$mode_exec"
+
+    # 2. Handle Env Templates
+    if [[ -f "$env_example" ]]; then
+        _install_file "$env_example" "${csm_configs}/" "$mode_conf"
+        [[ ! -f "$env_local" ]] && $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$env_example" "$env_local"
+        [[ ! -f "$env_swarm" ]] && $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$env_example" "$env_swarm"
+        _log INFO "Initial setup: Created local and swarm .env templates"
+    fi
+
+    # 3. Handle Compose Templates
+    if [[ -f "$compose_example" ]]; then
+        _install_file "$compose_example" "${csm_configs}/" "$mode_conf"
+        [[ ! -f "$compose_local" ]] && $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$compose_example" "$compose_local"
+        [[ ! -f "$compose_swarm" ]] && $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$compose_example" "$compose_swarm"
+        _log INFO "Initial setup: Created local and swarm compose templates"
+    fi
+
+    # 4. Handle Core Configurations
+    if [[ -f "$conf_example" ]]; then
+        _install_file "$conf_example" "${csm_configs}/" "$mode_conf"
+        if [[ ! -f "$conf_default" ]]; then
+            $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$conf_example" "$conf_default"
+            _log INFO "Initial setup: Created $conf_default"
+        fi
+    fi
+    if [[ -f "$conf_default" && ! -f "$conf_user" ]]; then
+        $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$conf_default" "$conf_user"
         _log INFO "Initial setup: Created $conf_user"
+    fi
 
-    # 3. Consolidated Patching Logic
-    local files_to_patch=()
-    [[ -f "$conf_default" ]] && files_to_patch+=("$conf_default")
-    [[ -f "$conf_user" ]] && files_to_patch+=("$conf_user")
-
-    for target_conf in "${files_to_patch[@]}"; do
-        _log STEP "_setup_files: patching variables into $(basename "$target_conf")"
-
-        sed -i -e "s|^CSM_CONTAINER_RUNTIME=.*|CSM_CONTAINER_RUNTIME=${_runtime}|" \
-               -e "s|^CSM_STACKS_GID=.*|CSM_STACKS_GID=${csm_gid}|" \
-               -e "s|^CSM_STACKS_UID=.*|CSM_STACKS_UID=${csm_uid}|" \
-               "$target_conf"
-
-        _log INFO "Patched runtime and IDs into $target_conf"
-    done
+    # 5. Consolidated Patching Logic
+    local targets=()
+    [[ -f "$conf_default" ]] && targets+=("$conf_default")
+    [[ -f "$conf_user" ]] && targets+=("$conf_user")
+    if [[ ${#targets[@]} -gt 0 ]]; then
+        _log STEP "_setup_files: patching runtime variables..."
+        sed -i  -e "s|^CSM_CONTAINER_RUNTIME=.*|CSM_CONTAINER_RUNTIME=${_runtime}|" \
+                -e "s|^CSM_STACKS_GID=.*|CSM_STACKS_GID=${csm_gid}|" \
+                -e "s|^CSM_STACKS_UID=.*|CSM_STACKS_UID=${csm_uid}|" \
+                "${targets[@]}"
+    fi
 
     _log INFO "_setup_files: done"
 }
@@ -418,56 +447,35 @@ _setup_files() {
 _setup_symlinks() {
     _log STEP "_setup_symlinks: setting up symlinks..."
 
-    # ~/stacks  → csm_dir
-    local link_target="$csm_dir"
+    # 1. Convenience Link: ~/stacks -> CSM_ROOT_DIR
     local link_source="$csm_link"
-    _log STEP "_setup_symlinks: checking ~/stacks symlink ($link_source → $link_target)"
-    if [[ ! -e "$link_source" && ! -L "$link_source" ]]; then
-        _log STEP "_setup_symlinks: creating symlink $link_source → $link_target"
+    local link_target="$csm_dir"
+
+    if [[ -L "$link_source" ]]; then
+        # Use -f to resolve absolute paths for comparison
+        if [[ "$(readlink -f "$link_source")" != "$(readlink -f "$link_target")" ]]; then
+            _log WARN "Symlink $link_source is misaligned. Correcting..."
+            rm -f "$link_source"
+            ln -s "$link_target" "$link_source"
+        fi
+    elif [[ ! -e "$link_source" ]]; then
         ln -s "$link_target" "$link_source"
-        _log INFO "Created symlink: $link_source → $link_target"
-    elif [[ -L "$link_source" ]]; then
-        local current_target
-        current_target="$(readlink "$link_source")"
-        if [[ "$current_target" != "$link_target" ]]; then
-            _log WARN "Symlink $link_source points to $current_target (expected $link_target)"
-            _confirm_no "Update symlink to point to $link_target?" && {
-                _log STEP "_setup_symlinks: updating symlink $link_source"
-                rm -f "$link_source"
-                ln -s "$link_target" "$link_source"
-                _log INFO "Symlink updated."
-            }
-        else
-            _log PASS "Symlink $link_source is correct."
-        fi
-    else
-        _log WARN "$link_source exists and is not a symlink – leaving it alone."
+        _log INFO "Created symlink: $link_source"
     fi
 
-# /usr/local/bin/csm  → csm_configs/csm.sh
-    local csm_bin="${csm_configs}/csm.sh"
-    _log STEP "_setup_symlinks: checking $bin_link → $csm_bin"
+    # 2. Binary Link: /usr/local/bin/csm -> .configs/csm.sh
+    local bin_source="$bin_link"
+    local bin_target="${csm_configs}/csm.sh"
 
-    if [[ ! -e "$bin_link" && ! -L "$bin_link" ]]; then
-        _log STEP "_setup_symlinks: creating symlink $bin_link → $csm_bin"
-        $var_sudo ln -sf "$csm_bin" "$bin_link"
-        _log INFO "Created symlink: $bin_link → $csm_bin"
-    elif [[ -L "$bin_link" ]]; then
-        # Check if the existing link points to the correct location
-        local current_target
-        current_target=$(readlink -f "$bin_link")
-
-        if [[ "$current_target" == "$csm_bin" ]]; then
-            _log PASS "Symlink $bin_link correctly points to $csm_bin."
-        else
-            _log WARN "Symlink $bin_link points to $current_target. Correcting..."
-            $var_sudo ln -sf "$csm_bin" "$bin_link"
-            _log INFO "Updated symlink: $bin_link → $csm_bin"
+    if [[ -L "$bin_source" ]]; then
+        if [[ "$(readlink -f "$bin_source")" != "$(readlink -f "$bin_target")" ]]; then
+            _log WARN "Binary link $bin_source is misaligned. Correcting..."
+            $var_sudo ln -sf "$bin_target" "$bin_source"
         fi
-    else
-        _log WARN "$bin_link exists and is not a symlink – leaving it alone."
+    elif [[ ! -e "$bin_source" ]]; then
+        $var_sudo ln -sf "$bin_target" "$bin_source"
+        _log INFO "Created binary symlink: $bin_source"
     fi
-    _log INFO "_setup_symlinks: done"
 }
 
 _set_ownership() {
