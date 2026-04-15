@@ -10,7 +10,8 @@
 #   ├── csm.sh
 #   ├── csm-install.sh
 #   ├── default.conf
-#   └── example.env
+#   ├── default.env
+#   └── README.md
 #
 # Installed layout:
 #   /srv/stacks/                   ← CSM_DIR
@@ -37,7 +38,7 @@
 
 set -euo pipefail
 
-readonly CSM_VERSION="0.2.5"
+readonly CSM_VERSION="0.3.0"
 readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 csm_debug="1" # set to "1" to display debug step messages
@@ -45,8 +46,8 @@ csm_cmd=""    # set by _detect_command
 scope=""      # set by _detect_scope
 
 # Permission modes (symbolic form — compatible with GNU and BSD install)
-readonly mode_dirs="775"    # directories: rwxrwxr-x
-readonly mode_exec="770"   # executables: rwxrwx---
+readonly mode_dirs="775"   # directories:  rwxrwxr-x
+readonly mode_exec="770"   # executables:  rwxrwx---
 readonly mode_conf="660"   # config files: rw-rw----
 readonly mode_auth="600"   # secrets:      rw-------
 
@@ -57,7 +58,10 @@ readonly mode_auth="600"   # secrets:      rw-------
 _tput_safe() { command -v tput >/dev/null 2>&1 && tput "$@" 2>/dev/null || true; }
 
 _color_setup() {
-    if [[ -t 1 ]]; then
+    if [[ -n ${CSM_NO_COLOR:-} || ! -t 1 ]]; then
+        red="" grn="" ylw="" blu="" mgn="" cyn=""
+        wht="" blk="" bld="" uln="" rst=""
+    else
         red=$(_tput_safe setaf 1)
         grn=$(_tput_safe setaf 2)
         ylw=$(_tput_safe setaf 3)
@@ -69,9 +73,6 @@ _color_setup() {
         bld=$(_tput_safe bold)
         uln=$(_tput_safe smul)
         rst=$(_tput_safe sgr0)
-    else
-        red="" grn="" ylw="" blu="" mgn="" cyn=""
-        wht="" blk="" bld="" uln="" rst=""
     fi
 }
 
@@ -92,6 +93,12 @@ _log() {
     [[ "$level" == "EXIT" ]] && exit 1
 }
 
+_check_cmd() {
+    if ! command -v "$csm_cmd" >/dev/null 2>&1; then
+        _log EXIT "No $csm_cmd runtime found. Install Docker or Podman first."
+    fi
+}
+
 _confirm_no() {
     local prompt="${1:-Are you sure?}"
     read -r -p "${ylw}${bld}  ${prompt} [y/N]: ${rst}" reply
@@ -110,6 +117,7 @@ _confirm_yes() {
 
 _detect_command() {
     _log STEP "_detect_command: checking for docker compose..."
+    _check_cmd
     if docker compose version >/dev/null 2>&1; then
         csm_cmd="docker"
         _log STEP "_detect_command: using docker"
@@ -125,6 +133,7 @@ _detect_command() {
 
 _detect_swarm() {
     _log STEP "_detect_swarm: csm_cmd=$csm_cmd"
+    _check_cmd
     [[ "$csm_cmd" == "podman" ]] && { _log STEP "_detect_swarm: podman detected, skipping"; return 1; }
     local state
     state="$(docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || echo "inactive")"
@@ -137,6 +146,7 @@ _detect_scope() {
     local stack_dir="$(_get_stack_dir "$stack_name")"
 
     _log STEP "_detect_scope: stack_name=$stack_name, stack_dir=$stack_dir"
+    _check_cmd
 
     # 1. Podman has no swarm — always local
     [[ "$csm_cmd" == "podman" ]] && { _log STEP "_detect_scope: podman -> local"; scope="local"; return; }
@@ -170,10 +180,10 @@ _detect_scope() {
 _load_config() {
     _log STEP "_load_config: loading config files..."
     for f in \
-        "${script_dir}/.configs/"*.conf \
-        "${script_dir}/.configs/user.conf" \
-        "${HOME}/.config/csm/"*.conf \
-        "${HOME}/.config/csm/user.conf"
+        "${csm_configs}"/*.conf \
+        "${csm_configs}"/user.conf \
+        "${HOME}"/.config/csm/*.conf \
+        "${HOME}"/.config/csm/user.conf
     do
         if [[ -f "$f" ]]; then
             _log STEP "_load_config: sourcing $f"
@@ -263,8 +273,9 @@ _fix_permissions() {
 _del_safe() {
     local stack_name="$1"
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
-
     _log STEP "_del_safe: name=$stack_name, dir=$stack_dir"
+    _check_cmd
+
     [[ -d "$stack_dir" ]] || return 0
     [[ "$stack_dir" == "/" || "$stack_dir" == "$csm_dir" ]] && \
         _log EXIT "Safety guard: refusing to delete $stack_dir"
@@ -310,7 +321,7 @@ stack_create() {
     [[ -d "$stack_dir" ]] && _log EXIT "Stack '$stack_name' already exists at $stack_dir"
 
     _log STEP "stack_create: creating directories..."
-    mkdir -p "$stack_dir/appdata"
+    install -o "$csm_uid" -g "$csm_gid" -m "$mode_dirs" -d "$stack_dir"/appdata
     install -o "$csm_uid" -g "$csm_gid" -m "$mode_dirs" -d "$stack_dir"
 
     # 2. Handle Compose File
@@ -399,6 +410,7 @@ stack_remove() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
     _log STEP "stack_remove: name=$stack_name, dir=$stack_dir"
+    _check_cmd
     [[ -d "$stack_dir" ]] || _log EXIT "Stack '$stack_name' not found at $stack_dir"
 
     _confirm_no "Remove stack '$stack_name'? (all running stack containers will be removed)" \
@@ -499,6 +511,7 @@ stack_up() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local f; f="$(_require_compose_file "$stack_name")"
     _log STEP "stack_up: name=$stack_name, compose=$f"
+    _check_cmd
     _detect_scope "$stack_name"
     _log STEP "stack_up: scope=$scope"
     case "$scope" in
@@ -521,6 +534,7 @@ stack_down() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local f; f="$(_require_compose_file "$stack_name")"
     _log STEP "stack_down: name=$stack_name, compose=$f"
+    _check_cmd
     _detect_scope "$stack_name"
     _log STEP "stack_down: scope=$scope"
     case "$scope" in
@@ -564,6 +578,7 @@ stack_start() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local f; f="$(_require_compose_file "$stack_name")"
     _log STEP "stack_start: name=$stack_name, compose=$f"
+    _check_cmd
     _detect_scope "$stack_name"
     _log STEP "stack_start: scope=$scope"
     case "$scope" in
@@ -586,6 +601,7 @@ stack_restart() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local f; f="$(_require_compose_file "$stack_name")"
     _log STEP "stack_restart: name=$stack_name, compose=$f"
+    _check_cmd
     _detect_scope "$stack_name"
     _log STEP "stack_restart: scope=$scope"
     case "$scope" in
@@ -608,6 +624,7 @@ stack_stop() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local f; f="$(_require_compose_file "$stack_name")"
     _log STEP "stack_stop: name=$stack_name, compose=$f"
+    _check_cmd
     _detect_scope "$stack_name"
     _log STEP "stack_stop: scope=$scope"
     case "$scope" in
@@ -630,6 +647,7 @@ stack_update() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local f; f="$(_require_compose_file "$stack_name")"
     _log STEP "stack_update: name=$stack_name, compose=$f"
+    _check_cmd
     _detect_scope "$stack_name"
     _log STEP "stack_update: scope=$scope"
     case "$scope" in
@@ -775,6 +793,7 @@ secret_list() {
 
 stack_list() {
     _log STEP "stack_list: csm_dir=$csm_dir"
+    _check_cmd
     [[ -d "$csm_dir" ]] || _log EXIT "Stacks directory not found: $csm_dir"
 
     local swarm_active=false
@@ -851,6 +870,7 @@ stack_list() {
 
 stack_ps() {
     _log STEP "stack_ps: listing all containers"
+    _check_cmd
     local swarm_active=false
     _detect_swarm && swarm_active=true
     _log STEP "stack_ps: swarm_active=$swarm_active"
@@ -892,6 +912,7 @@ stack_status() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local f; f="$(_require_compose_file "$stack_name")"
     _log STEP "stack_status: name=$stack_name, compose=$f"
+    _check_cmd
     _detect_scope "$stack_name"
     _log STEP "stack_status: scope=$scope"
     case "$scope" in
@@ -908,6 +929,7 @@ stack_validate() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local f; f="$(_require_compose_file "$stack_name")"
     _log STEP "stack_validate: name=$stack_name, compose=$f"
+    _check_cmd
     _detect_scope "$stack_name"
     _log STEP "stack_validate: scope=$scope"
     case "$scope" in
@@ -930,6 +952,7 @@ stack_inspect() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local f; f="$(_require_compose_file "$stack_name")"
     _log STEP "stack_inspect: name=$stack_name, compose=$f"
+    _check_cmd
     _detect_scope "$stack_name"
     _log STEP "stack_inspect: scope=$scope"
     case "$scope" in
@@ -949,6 +972,7 @@ stack_logs() {
     local f; f="$(_require_compose_file "$stack_name")"
     local lines="${2:-50}"
     _log STEP "stack_logs: name=$stack_name, lines=$lines"
+    _check_cmd
     _detect_scope "$stack_name"
     _log STEP "stack_logs: scope=$scope"
     case "$scope" in
@@ -967,6 +991,7 @@ stack_cd() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
     _log STEP "stack_cd: name=$stack_name, dir=$stack_dir"
+    _check_cmd
     [[ -d "$stack_dir" ]] || _log EXIT "Stack '$stack_name' not found at $stack_dir"
     echo "$stack_dir"
 }
@@ -982,6 +1007,7 @@ net_info() {
     local target="${2:-${csm_net_name}}"
 
     _log STEP "net_info: action=$action"
+    _check_cmd
 
     case "$action" in
         h|host)
@@ -1089,15 +1115,16 @@ manage_module() {
 # =============================================================================
 
 _print_aliases() {
+    _log STEP "_print_aliases: "
     cat <<ALIAS
 # Container Stack Manager — shell helpers
 # Source this in your shell rc:  eval "\$(csm --aliases)"
 
 # Check host and container IPs
-hostip() { echo "Host IP: \$(wget -qO- ifconfig.me)"; }
-lancheck() { echo "Container IP: \$(${csm_cmd} container exec -it "\${*}" wget -qO- ipinfo.io)"; }
-vpncheck() { echo "Container IP: \$(${csm_cmd} container exec -it "\${*}" wget -qO- ipinfo.io/ip)" && \\
-            echo "     Host IP: \$(wget -qO- ifconfig.me)"; }
+hostip() { echo "Host IP: \$(curl -fsSL ifconfig.me 2>/dev/null || wget -qO- ifconfig.me)"; }
+lancheck() { echo "Container IP: \$(${csm_cmd} container exec -it "\${*}" curl -fsSL ipinfo.io 2>/dev/null || wget -qO- ipinfo.io)"; }
+vpncheck() { echo "Container IP: \$(${csm_cmd} container exec -it "\${*}" curl -fsSL ipinfo.io/ip 2>/dev/null || wget -qO- ipinfo.io/ip)" && \\
+            echo "     Host IP: \$(curl -fsSL ifconfig.me 2>/dev/null || wget -qO- ifconfig.me)"; }
 
 # cd into stacks directory or a specific stack
 alias cds='cd ${csm_dir}'
@@ -1157,6 +1184,8 @@ ${bld}Options:${rst}
     -h | --help            Show this help
     -V | --version         Show version
     --aliases              Print shell aliases to eval in your shell rc
+
+${bld}Container Stack Manager (csm.sh) version:${rst} ${ylw}${CSM_VERSION}${rst}
 EOF
 }
 
@@ -1166,19 +1195,19 @@ EOF
 
 main() {
     local cmd="${1:-}"
+    _color_setup
     _log STEP "main() called with cmd='$cmd'"
     [[ -z "$cmd" ]] && { show_help; exit 0; }
     shift || true
 
     _log STEP "Setting up colors..."
-    _color_setup
     _log STEP "Loading config files..."
     _load_config
 
     case "$cmd" in
-        --a|--aliases)    _print_aliases; exit 0 ;;
-        -h|--help|h|help) show_help; exit 0 ;;
-        -v|--version)     echo "CSM v${CSM_VERSION}"; exit 0 ;;
+        -a | --aliases)         _print_aliases; exit 0 ;;
+        -h | --help | h | help) show_help; exit 0 ;;
+        -v | --version)         echo "CSM v${CSM_VERSION}"; exit 0 ;;
     esac
 
     _log STEP "Validating config..."
