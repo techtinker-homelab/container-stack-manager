@@ -420,7 +420,7 @@ _install_dir() {
 }
 
 _install_file() {
-    local src="$1" dest_dir="$2" mode="$3" flag="$4"
+    local src="${1:-}" dest_dir="${2:-}" mode="${3:-}" flag="${4:-}"
     local filename=$(basename "$src")
 
     if [[ -f "$src" ]]; then
@@ -550,7 +550,7 @@ _setup_network() {
     case "$csm_runtime" in
         podman)
             _log STEP "_setup_network: creating podman network $net_name"
-            $var_sudo podman network create "$net_name" \
+            $var_sudo podman network create "$net_name" >/dev/null 2>&1 \
                 && _log PASS "Podman network '$net_name' created." \
                 || _log WARN "Failed to create Podman network '$net_name'."
             ;;
@@ -558,12 +558,12 @@ _setup_network() {
             # Check if Swarm is active to determine network driver
             if $var_sudo docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null | grep -q "active"; then
                 _log STEP "_setup_network: creating docker swarm overlay network $net_name"
-                $var_sudo docker network create --driver overlay --attachable "$net_name" \
+                $var_sudo docker network create --driver overlay --attachable "$net_name" >/dev/null 2>&1 \
                     && _log PASS "Docker Swarm network '$net_name' created." \
                     || _log WARN "Failed to create Docker Swarm network '$net_name'."
             else
                 _log STEP "_setup_network: creating docker bridge network $net_name"
-                $var_sudo docker network create "$net_name" \
+                $var_sudo docker network create "$net_name" >/dev/null 2>&1 \
                     && _log PASS "Docker network '$net_name' created." \
                     || _log WARN "Failed to create Docker network '$net_name'."
             fi
