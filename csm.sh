@@ -7,38 +7,41 @@
 # =============================================================================
 # Repository file layout (pre-install):
 #   ./<repo>/
-#   ├── csm.sh
-#   ├── csm-install.sh
-#   ├── default.conf
-#   ├── default.env
-#   └── README.md
+#   ├── csm.sh              ← Main runtime script (symlinked to /usr/local/bin/csm during install)
+#   ├── csm-install.sh      ← One-shot installer (run once; sets up the environment)
+#   ├── example.conf        ← Default configuration values (copied as default.conf during install)
+#   ├── example.conf        ← Example global environment template
+#   └── README.md           ← Project description and instructions for installation and use.
 #
 # Installed layout:
-#   /srv/stacks/                   ← CSM_DIR
-#   ├── csm.sh
-#   ├── .backup/
-#   │   └── <stack>/<stack>-YYYYMMDD_HHMMSS.tar.gz
+#   /srv/stacks/                    ← CSM root directory
+#   ├── .backups/
+#   │  └── <stack>/
+#   │     └── <stack>-YYYYMMDD_HHMMSS.tar.gz  ← backup file for each stack
 #   ├── .configs/
-#   |   ├── .example.env
-#   |   ├── .local.env
-#   |   ├── .swarm.env
-#   │   ├── default.conf
-#   │   └── user.conf          ← user overrides (optional)
+#   │  ├── csm.sh                   ← main CSM script containing all helper scripts
+#   │  ├── default.conf             ← default configuration variables
+#   │  ├── local-compose.yml        ← example compose.yml for "local" Docker & Podman
+#   │  ├── swarm-compose.yml        ← example compose.yml for Docker Swarm only
+#   │  └── user.conf                ← user overrides (optional)
 #   ├── .secrets/
-#   |   └── <variable_name>.secret
-#   └── .modules/
-#   │   └── <stack>/
-#   │       ├── compose.yml
-#   │       └── example.env
+#   │  ├── .local.env               ← Podman and Docker Local variables
+#   │  ├── .swarm.env               ← Docker Swarm specific variables
+#   │  ├── example.env              ← bare bones example .env variables
+#   │  └── <variable_name>.secret   ← one secret file per secret variable
+#   ├── .modules/
+#   │  └── <stack>/                 ← descriptive name of the stack
+#   │     ├── compose.yml           ← pre-made compose.yml tailored to work with CSM
+#   │     └── example.env           ← variables required for this specific compose.yml
 #   └── <stack>/
-#       ├── .env
-#       ├── compose.yml
-#       └── appdata/
+#      ├── .env                     ← symlinked to the .scope.env / custom .env
+#      ├── compose.yml              ← stack containers configuration file
+#      └── appdata/                 ← stack appdata directory for each container
 # =============================================================================
 
 set -euo pipefail
 
-readonly CSM_VERSION="0.3.0"
+readonly CSM_VERSION="0.3.1"
 readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 csm_debug="1" # set to "1" to display debug step messages
@@ -97,6 +100,20 @@ _check_cmd() {
     if ! command -v "$csm_cmd" >/dev/null 2>&1; then
         _log EXIT "No $csm_cmd runtime found. Install Docker or Podman first."
     fi
+}
+
+_check_dir() {
+    local dir="$1"
+    [[ ! -d "$dir" ]] && return 0 # Skip if directory doesn't exist
+
+    local owner; owner=$(stat -c '%U' "$dir" 2>/dev/null || stat -f '%Su' "$dir")
+    local perms; perms=$(stat -c '%a' "$dir" 2>/dev/null || stat -f '%Lp' "$dir")
+
+    # Safe if owned by current user or root AND not world-writable (last digit < 2)
+    if [[ "$owner" == "$USER" || "$owner" == "root" ]] && [[ "${perms: -1}" < "2" ]]; then
+        return 0
+    fi
+    return 1
 }
 
 _confirm_no() {
@@ -179,6 +196,21 @@ _detect_scope() {
 
 _load_config() {
     _log STEP "_load_config: loading config files..."
+    local config_paths=(
+        "${csm_configs}"
+        "${HOME}/.config/csm"
+    )
+
+    for dir in "${config_paths[@]}"; do
+        if _check_dir "$dir"; then
+            for f in "$dir"/*.conf "$dir"/user.conf; do
+                [[ -f "$f" ]] && source "$f"
+            done
+        else
+            _log WARN "Skipping unsafe config directory: $dir"
+        fi
+    done
+
     for f in \
         "${csm_configs}"/*.conf \
         "${csm_configs}"/user.conf \
@@ -387,10 +419,9 @@ stack_edit() {
 
 stack_backup() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
-    stack_name="${stack_name%/}" # Strip trailing slash if present
+    stack_name="${stack_name%/}"
 
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
-    _log STEP "stack_backup: name=$stack_name, dir=$stack_dir"
     [[ -d "$stack_dir" ]] || _log EXIT "Stack '$stack_name' not found."
 
     local ts backup_dir backup_file
@@ -398,12 +429,21 @@ stack_backup() {
     backup_dir="${csm_backups}/${stack_name}"
     backup_file="${backup_dir}/${stack_name}_${ts}.tar.gz"
 
-    _log STEP "stack_backup: creating $backup_dir"
     mkdir -p "$backup_dir"
-    _log STEP "stack_backup: running tar -czf $backup_file -C $csm_dir $stack_name"
-    tar -czf "$backup_file" -C "$csm_dir" "$stack_name" && \
-        _log PASS "Backup complete: $backup_file" || \
-        _log FAIL "Backup failed: $backup_file, please check permissions and folder paths."
+
+    _log STEP "stack_backup: creating $backup_file"
+    if tar -czf "$backup_file" -C "$csm_dir" "$stack_name"; then
+        # Integrity Check: Verify the archive can be read
+        if tar -tzf "$backup_file" >/dev/null 2>&1; then
+            _log PASS "Backup complete and verified: $backup_file"
+        else
+            _log FAIL "Backup created but failed integrity check: $backup_file"
+            return 1
+        fi
+    else
+        _log FAIL "Backup failed during creation: $backup_file"
+        return 1
+    fi
 }
 
 stack_remove() {
@@ -875,24 +915,34 @@ stack_ps() {
     _detect_swarm && swarm_active=true
     _log STEP "stack_ps: swarm_active=$swarm_active"
 
+    # 1. List all containers with improved formatting
     {
-        printf "%sCONTAINER ID  NAME  STATUS  PORTS%s\n" "${bld}" "${rst}"
+        printf "%s%-20s %-30s %-20s %-20s%s\n" "${bld}" "CONTAINER ID" "NAME" "STATUS" "PORTS" "${rst}"
         $csm_cmd ps --all --format "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}" | \
         sort -k2,2 | \
-        awk 'BEGIN { FS="\t"; OFS="\t" } {
-            gsub(/0\.0\.0\.0:/, "", $4)
-            gsub(/, *\[::\]:[^ ]*/, "", $4)
-            gsub(/->[0-9]+\/[a-z]+/, "", $4)
-            print
-        }'
-    } | column -ts $'\t' | sed -E "
-        1 s/^.*$/${bld}&${rst}/
-        2,\$ s/^([^ ]+ +)([^ ]+)/\1${cyn}\2${rst}/
-        s/unhealthy/${red}&${rst}/g
-        s/\bhealthy\b/${grn}&${rst}/g
-        s/([0-9]+\/[a-z]+)/${blu}\1${rst}/g
-    "
+        sed -E "
+            s/^([^ \t]+)\t([^ \t]+)\t([^ \t]+)\t(.+)/\1\t${cyn}\2${rst}\t\3\t\4/
+            s/0\.0\.0\.0://g; s/\[::\]://g; s/->[0-9]+\/[a-z]+//g; s/, //g
+            s/unhealthy/${red}unhealthy${rst}/g
+            s/healthy/${grn}healthy${rst}/g
+            s/([0-9]+\/[a-z]+)/${blu}\1${rst}/g
+        "
+    } | column -ts $'\t'
+    # # TODO: Needs testing; while loops are slower than `sed` but more portable.
+    # while IFS=$'\t' read -r id name status ports; do
+    #     # Clean ports (Bash string replacement)
+    #     ports="${ports//0.0.0.0:/}"
+    #     ports="${ports//[::]:/}"
+    #     ports="${ports//->[0-9]+\/[a-z]+ /}"
 
+    #     # Color status
+    #     [[ "$status" == *"unhealthy"* ]] && status="${red}unhealthy${rst}"
+    #     [[ "$status" == *"healthy"* ]] && status="${grn}healthy${rst}"
+
+    #     printf "%s\t%s%s%s\t%s\t%s\n" "$id" "$cyn" "$name" "$rst" "$status" "$ports"
+    # done < <($csm_cmd ps --all --format "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}" | sort -k2,2)
+
+    # 2. Swarm specific service listings
     if $swarm_active; then
         local services
         services="$(docker stack ls 2>/dev/null | awk 'NR>1 {print $1}')"
@@ -1145,7 +1195,7 @@ ${bld}Stack Lifecycle:${rst}
     c  | create   <n>           Create a new stack directory + compose scaffold
     n  | new      <n>           Create a new stack directory + compose scaffold
     e  | edit     <n>           Open compose.yml in \$EDITOR
-    m  | modify   <old> <new>   Rename a stack directory
+    r  | rename   <old> <new>   Rename a stack directory
     rm | remove   <n>           Stop and remove containers in a stack (prompts)
     dt | delete   <n>           Stop and PERMANENTLY delete stack + all data (prompts)
     bu | backup   <n>           Tar-gz the stack directory to .backup/
