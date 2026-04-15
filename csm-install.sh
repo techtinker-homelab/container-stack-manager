@@ -3,6 +3,20 @@
 # csm-install.sh  –  Container Stack Manager Installer
 # =============================================================================
 
+set -euo pipefail
+
+# .lock file created to prevent duplicate installer scripts running concurrently
+LOCKFILE="/var/lock/csm-install.lock"
+if ! command -v flock >/dev/null 2>&1; then
+    echo "WARNING: flock not found – install util-linux or coreutils for safety." >&2
+    exit 1
+fi
+exec 200>"$LOCKFILE"
+if ! flock -n 200; then
+    echo "Another instance of csm-install.sh is already running." >&2
+    exit 1
+fi
+
 # Prevent sourcing — must be executed directly
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     : # running directly, proceed
@@ -11,6 +25,8 @@ else
     echo "Run: bash csm-install.sh  (or ./csm-install.sh)" >&2
     return 1 2>/dev/null || exit 1
 fi
+
+# =============================================================================
 
 # What this script does (in order):
 #   1.  Validate root / sudo access
@@ -23,11 +39,8 @@ fi
 #   8.  Create ~/stacks symlink pointing to CSM_DIR
 #   9.  Symlink /usr/local/bin/csm → CSM_DIR/.configs/csm.sh
 #  10.  Set final ownership
-# =============================================================================
 
-set -euo pipefail
-
-readonly INSTALLER_VERSION="0.2.5"
+readonly INSTALLER_VERSION="0.3.0"
 
 force_install=0
 uninstall_mode=0
@@ -35,13 +48,16 @@ uninstall_mode=0
 csm_runtime=""   # set by _detect_container_runtime or _install_container_runtime
 
 # =============================================================================
-# 0. HELPERS
+# 0. HELPER FUNCTIONS
 # =============================================================================
 
 _tput_safe() { command -v tput >/dev/null 2>&1 && tput "$@" 2>/dev/null || true; }
 
 _color_setup() {
-    if [[ -t 1 ]]; then
+    if [[ -n ${CSM_NO_COLOR:-} || ! -t 1 ]]; then
+        red="" grn="" ylw="" blu="" mgn="" cyn=""
+        wht="" blk="" bld="" uln="" rst=""
+    else
         red=$(_tput_safe setaf 1)
         grn=$(_tput_safe setaf 2)
         ylw=$(_tput_safe setaf 3)
@@ -53,12 +69,8 @@ _color_setup() {
         bld=$(_tput_safe bold)
         uln=$(_tput_safe smul)
         rst=$(_tput_safe sgr0)
-    else
-        red="" grn="" ylw="" blu="" mgn="" cyn=""
-        wht="" blk="" bld="" uln="" rst=""
     fi
 }
-_color_setup
 
 _log() {
     local level="${1:-INFO}" message="${2:-}"
@@ -77,7 +89,7 @@ _log() {
     [[ "$level" == "EXIT" ]] && exit 1
 }
 
-_die()     { _log FAIL "$1"; exit 1; }
+_die() { _log FAIL "$1"; exit 1; }
 
 _confirm_yes() {
     [[ "$force_install" == 1 ]] && return 0
@@ -313,7 +325,7 @@ _create_runtime_group() {
     local lgid=${csm_gid:-2000}
     _log STEP "_create_runtime_group: checking if group '$csm_group' (GID $lgid) exists..."
 
-    if ! getent group "$lgid" >/dev/null 2>&1; then
+    if ! getent group "$csm_group" >/dev/null 2>&1; then
         _log STEP "_create_runtime_group: creating group..."
         $var_sudo groupadd -g "$lgid" "$csm_group" \
             && _log INFO "Created group '$csm_group' (GID $lgid)" \
@@ -354,13 +366,19 @@ _install_dir() {
 }
 
 _install_file() {
-    local src="$1" dest_dir="$2" mode="$3"
+    local src="$1" dest_dir="$2" mode="$3" flag="$4"
     local filename=$(basename "$src")
 
     if [[ -f "$src" ]]; then
         _log STEP "_install_file: installing $filename (mode=$mode)"
-        # -v: verbose, -C: only copy if different, -p: preserve timestamps
-        $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -C -p "$src" "$dest_dir/"
+        case "$flag" in
+            -f | --force)
+                $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -p "$src" "$dest_dir/"
+                ;;
+            *)
+                # -v: verbose, -C: only copy if different, -p: preserve timestamps
+                $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -C -p "$src" "$dest_dir/"
+        esac
         _log INFO "Installed: $filename → $dest_dir"
     else
         _log WARN "Source file missing: $src"
@@ -403,7 +421,7 @@ _setup_files() {
     local env_swarm="${csm_configs}/.swarm.env"
 
     # 1. Install the core script
-    _install_file "${script_dir}/csm.sh" "${csm_configs}/" "$mode_exec"
+    _install_file "${script_dir}/csm.sh" "${csm_configs}/" "$mode_exec" --force
 
 # 2. Handle Env Templates
     if [[ -f "$env_example" ]]; then
@@ -431,7 +449,7 @@ _setup_files() {
 
     # 4. Handle Core Configurations
     if [[ -f "$conf_example" ]]; then
-        _install_file "$conf_example" "${csm_configs}/" "$mode_conf"
+        _install_file "$conf_example" "${csm_configs}/" "$mode_conf" --force
         if [[ ! -f "$conf_default" || "$force_install" == 1 ]]; then
             $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$conf_example" "$conf_default"
             _log INFO "Initial setup: Created/Overwrote $conf_default"
@@ -553,16 +571,41 @@ _uninstall_csm() {
 }
 
 # =============================================================================
-# 12. MAIN
+# 12. HELP
+# =============================================================================
+
+show_help() {
+    cat <<EOF
+${bld}Container Stack Manager (CSM) Installer v${INSTALLER_VERSION}${rst}
+
+${bld}Usage:${rst} ${script_dir}/csm-install.sh [options]
+
+${bld}Options:${rst}
+    -f | --force        over-writes script and config files without confirmation.
+    -h | --help         Show this help message.
+    -u | --uninstall    Uninstall all CSM scripts and unmodified config files.
+    -V | --version      Show installer version.
+
+${bld}Container Stack Manager Installer (csm-install.sh) version:${rst} ${ylw}${INSTALLER_VERSION}${rst}
+EOF
+}
+
+# =============================================================================
+# 13. MAIN
 # =============================================================================
 
 main() {
+    _color_setup
+    [[ -z "$1" ]] && { show_help; exit 0; }
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -f|--force)     force_install=1; shift ;;
-            -u|--uninstall) uninstall_mode=1; shift ;;
-            *) _log WARN "Unknown argument: $1"; shift ;;
+            # -d | --dryrun)      dry_run=1; csm_debug=1; shift ;; # TODO: implement dry run feature
+            -f | --force)       force_install=1; shift ;;
+            -h | --help )       show_help; exit 0 ;;
+            -u | --uninstall)   uninstall_mode=1; shift ;;
+            -V | --version)     _log PASS "Container Stack Manager Installer, csm-install.sh version: ${INSTALLER_VERSION}"; exit 0 ;;
+            *) _log WARN "Unknown argument: $1 \n Use './csm-install.sh help' to view supported options."; shift ;;
         esac
     done
 
