@@ -15,6 +15,12 @@ A unified CLI tool for managing Docker and Podman Compose stacks on a single hos
 
 ---
 
+- If you like this project and want to support me, here's a link:
+
+<a href="https://ko-fi.com/drauku"><img src="https://ko-fi.com/img/githubbutton_sm.svg"></a>
+
+---
+
 ## Installation Guide
 
 **Prerequisites:** A Linux host (Debian, Ubuntu, Fedora, or Arch). You do not need a container runtime pre-installed; the installer can also handle this.
