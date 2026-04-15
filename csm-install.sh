@@ -689,10 +689,10 @@ EOF
 
 main() {
     _color_setup
-    [[ -z "$1" ]] && { show_help; exit 0; }
+    [[ -z "${1:-}" ]] && { show_help; exit 0; }
     # Parse arguments
     while [[ $# -gt 0 ]]; do
-        case "$1" in
+        case "${1:-}" in
             # -d | --dryrun)      dry_run=1; csm_debug=1; shift ;; # TODO: implement dry run feature
             -f | --force)       force_install=1; shift ;;
             -h | --help )       show_help; exit 0 ;;
