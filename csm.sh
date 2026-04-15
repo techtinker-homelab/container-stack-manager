@@ -86,14 +86,14 @@ _log() {
         EXIT|FAIL)  color="${red}" ;;
         INFO)       color="${cyn}" ;;
         PASS)       color="${grn}" ;;
-        STEP)       color="${mgn}"; [[ "${csm_debug:-0}" == "1" ]] || return 0 ;;
+        STEP)       color="${mgn}"; if [[ "${csm_debug:-0}" == "0" ]]; then return 0; fi ;;
         WARN)       color="${ylw}" ;;
         *)          color="${ylw}"; level="WARN"
                     message="[Unknown log type: '${level}'] $message"
                     ;;
     esac
     printf "%s %-4s >> %s%s\n" "${color}${bld}" "${level}" "${message}" "${rst}" >&2
-    [[ "$level" == "EXIT" ]] && exit 1
+    if [[ "$level" == "EXIT" ]]; then exit 1; fi
 }
 
 _check_cmd() {
@@ -104,7 +104,7 @@ _check_cmd() {
 
 _check_dir() {
     local dir="$1"
-    [[ ! -d "$dir" ]] && return 0 # Skip if directory doesn't exist
+    if [[ ! -d "$dir" ]]; then return 0; fi # Skip if directory doesn't exist
 
     local owner; owner=$(stat -c '%U' "$dir" 2>/dev/null || stat -f '%Su' "$dir")
     local perms; perms=$(stat -c '%a' "$dir" 2>/dev/null || stat -f '%Lp' "$dir")
@@ -116,16 +116,20 @@ _check_dir() {
     return 1
 }
 
-_confirm_no() {
-    local prompt="${1:-Are you sure?}"
-    read -r -p "${ylw}${bld}  ${prompt} [y/N]: ${rst}" reply
-    [[ "${reply,,}" == "y" ]]
-}
-
 _confirm_yes() {
+    if [[ "$force_install" == 1 ]]; then return 0; fi
     local prompt="${1:-Are you sure?}"
     read -r -p "${ylw}${bld} ${prompt} [Y/n]: ${rst}" reply
-    [[ -z "${reply}" || "${reply,,}" == "y" ]]
+    if [[ -z "${reply}" || "${reply,,}" == "y" ]]; then return 0; fi
+    return 1 # Explicitly return 1 so the script doesn't crash
+}
+
+_confirm_no() {
+    if [[ "$force_install" == 1 ]]; then return 0; fi
+    local prompt="${1:-Are you sure?}"
+    read -r -p "${ylw}${bld}  ${prompt} [y/N]: ${rst}" reply
+    if [[ "${reply,,}" == "y" ]]; then return 0; fi
+    return 1 # Explicitly return 1
 }
 
 # =============================================================================
@@ -151,47 +155,63 @@ _detect_command() {
 _detect_swarm() {
     _log STEP "_detect_swarm: csm_cmd=$csm_cmd"
     _check_cmd
-    [[ "$csm_cmd" == "podman" ]] && { _log STEP "_detect_swarm: podman detected, skipping"; return 1; }
+    if [[ "$csm_cmd" == "podman" ]]; then
+        _log STEP "_detect_swarm: podman detected, skipping"
+        return 1
+    fi
     local state
     state="$(docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || echo "inactive")"
     _log STEP "_detect_swarm: swarm state=$state"
-    [[ "$state" == "active" ]]
+    if [[ "$state" == "active" ]]; then return 0; fi
+    return 1 # Explicit return
 }
 
 _detect_scope() {
     local stack_name="$1"
     local stack_dir="$(_get_stack_dir "$stack_name")"
-
     _log STEP "_detect_scope: stack_name=$stack_name, stack_dir=$stack_dir"
     _check_cmd
 
-    # 1. Podman has no swarm — always local
-    [[ "$csm_cmd" == "podman" ]] && { _log STEP "_detect_scope: podman -> local"; scope="local"; return; }
-
-    # 2. Explicit marker files override auto-detect
-    [[ -f "${stack_dir}/.local" ]] && { _log STEP "_detect_scope: .local marker found -> local"; scope="local"; return; }
-    [[ -f "${stack_dir}/.swarm" ]] && { _log STEP "_detect_scope: .swarm marker found -> swarm"; scope="swarm"; return; }
-
-    # 3. Swarm inactive — always local
-    _detect_swarm || { _log STEP "_detect_scope: swarm inactive -> local"; scope="local"; return; }
-
-    # 4. Swarm active — is this stack already deployed to it?
-    if docker stack ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qw "$stack_name"; then
-        _log STEP "_detect_scope: stack found in swarm ls -> swarm"
-        scope="swarm"
-        return
+    # Podman has no swarm — always local
+    if [[ "$csm_cmd" == "podman" ]]; then
+        _log STEP "_detect_scope: podman -> local"; scope="local"
+        return 0 # Changed from return to return 0
     fi
 
-    # 5. Ingress network check (replaces compose parsing)
-    if docker network inspect ingress >/dev/null 2>&1; then
-        _log STEP "_detect_scope: ingress network found -> swarm"
-        scope="swarm"
-        return
+    # Explicit marker files override auto-detect
+
+
+    if [[ -f "${stack_dir}/.local" ]]; then
+        _log STEP "_detect_scope: .local marker found -> local"; scope="local"
+        return 0
+    fi
+    if [[ -f "${stack_dir}/.swarm" ]]; then
+        _log STEP "_detect_scope: .swarm marker found -> swarm"; scope="swarm"
+        return 0
     fi
 
-    # 6. Default fallback
+    # Check swarm status, otherwise set local scope
+    if _detect_swarm; then
+        # Swarm is active, now check if stack is deployed
+        if docker stack ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qw "$stack_name"; then
+            _log STEP "_detect_scope: stack found in swarm ls -> swarm"
+            scope="swarm"
+            return 0
+        fi
+        if docker network inspect ingress >/dev/null 2>&1; then
+            _log STEP "_detect_scope: ingress network found -> swarm"
+            scope="swarm"
+            return 0
+        fi
+    else
+        _log STEP "_detect_scope: swarm inactive -> local"; scope="local"
+        return 0
+    fi
+
+    # Default fallback
     _log STEP "_detect_scope: default -> local"
     scope="local"
+    return 0
 }
 
 _load_config() {
@@ -204,7 +224,7 @@ _load_config() {
     for dir in "${config_paths[@]}"; do
         if _check_dir "$dir"; then
             for f in "$dir"/*.conf "$dir"/user.conf; do
-                [[ -f "$f" ]] && source "$f"
+                if [[ -f "$f" ]]; then source "$f"; fi
             done
         else
             _log WARN "Skipping unsafe config directory: $dir"
@@ -259,7 +279,7 @@ _validate_permissions() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
     _log STEP "_validate_permissions: checking $stack_dir"
-    [[ -d "$stack_dir" ]] || return 0
+    if [[ ! -d "$stack_dir" ]]; then return 0; fi
     local perm
     perm=$(stat -c '%a' "$stack_dir" 2>/dev/null || stat -f '%Lp' "$stack_dir")
     _log STEP "_validate_permissions: got perm=$perm, expected 770"
@@ -274,7 +294,7 @@ _validate_permissions() {
 # =============================================================================
 
 _require_name() {
-    [[ -n "${1:-}" ]] || _log EXIT "Stack name is required."
+    if [[ ! -n "${1:-}" ]]; then _log EXIT "Stack name is required."; fi
     _log STEP "_require_name: $1"
     echo "$1"
 }
@@ -290,7 +310,7 @@ _require_compose_file() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local f="${csm_dir}/${stack_name}/compose.yml"
     _log STEP "_require_compose_file: checking $f"
-    [[ -f "$f" ]] || _log EXIT "Compose file not found: $f"
+    if [[ -f "$f" ]]; then _log EXIT "Compose file not found: $f"; fi
     echo "$f"
 }
 
@@ -308,9 +328,10 @@ _del_safe() {
     _log STEP "_del_safe: name=$stack_name, dir=$stack_dir"
     _check_cmd
 
-    [[ -d "$stack_dir" ]] || return 0
-    [[ "$stack_dir" == "/" || "$stack_dir" == "$csm_dir" ]] && \
+    if [[ ! -d "$stack_dir" ]]; then return 0; fi
+    if [[ "$stack_dir" == "/" || "$stack_dir" == "$csm_dir" ]]; then
         _log EXIT "Safety guard: refusing to delete $stack_dir"
+    fi
 
     if [[ -f "${stack_dir}/compose.yml" ]]; then
         _log STEP "_del_safe: compose.yml found, detecting scope and stopping..."
@@ -350,7 +371,7 @@ stack_create() {
     local tmpl_env="$csm_configs/.${target_scope}.env"
 
     _log STEP "stack_create: name=$stack_name, dir=$stack_dir, scope=$target_scope"
-    [[ -d "$stack_dir" ]] && _log EXIT "Stack '$stack_name' already exists at $stack_dir"
+    if [[ -d "$stack_dir" ]]; then _log EXIT "Stack '$stack_name' already exists at $stack_dir"; fi
 
     _log STEP "stack_create: creating directories..."
     install -o "$csm_uid" -g "$csm_gid" -m "$mode_dirs" -d "$stack_dir"/appdata
@@ -402,8 +423,8 @@ stack_rename() {
     local new_dir; new_dir="$(_get_stack_dir "$new_name")"
 
     _log STEP "stack_rename: renaming '$old_name' -> '$new_name'"
-    [[ -d "$old_dir" ]] || _log EXIT "Stack '$old_name' not found at $old_dir"
-    [[ -d "$new_dir" ]] && _log EXIT "Stack '$new_name' already exists at $new_dir"
+    if [[ ! -d "$old_dir" ]]; then _log EXIT "Stack '$old_name' not found at $old_dir"; fi
+    if [[ -d "$new_dir" ]]; then _log EXIT "Stack '$new_name' already exists at $new_dir"; fi
 
     _log STEP "stack_rename: moving $old_dir -> $new_dir"
     mv "$old_dir" "$new_dir"
@@ -422,7 +443,7 @@ stack_backup() {
     stack_name="${stack_name%/}"
 
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
-    [[ -d "$stack_dir" ]] || _log EXIT "Stack '$stack_name' not found."
+    if [[ ! -d "$stack_dir" ]]; then _log EXIT "Stack '$stack_name' not found."; fi
 
     local ts backup_dir backup_file
     ts="$(date +%Y%m%d_%H%M%S)"
@@ -451,10 +472,12 @@ stack_remove() {
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
     _log STEP "stack_remove: name=$stack_name, dir=$stack_dir"
     _check_cmd
-    [[ -d "$stack_dir" ]] || _log EXIT "Stack '$stack_name' not found at $stack_dir"
+    if [[ ! -d "$stack_dir" ]]; then _log EXIT "Stack '$stack_name' not found at $stack_dir"; fi
 
-    _confirm_no "Remove stack '$stack_name'? (all running stack containers will be removed)" \
-        || { _log INFO "Cancelled."; return 0; }
+    if ! _confirm_no "Remove stack '$stack_name'? (all running stack containers will be removed)"; then
+        _log INFO "Cancelled."
+        return 0
+    fi
 
     local f; f="$(_require_compose_file "$stack_name")"
     _log STEP "stack_remove: detecting scope..."
@@ -484,10 +507,10 @@ stack_delete() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
     _log STEP "stack_delete: name=$stack_name, dir=$stack_dir"
-    [[ -d "$stack_dir" ]] || _log EXIT "Stack '$stack_name' not found at $stack_dir"
+    if [[ ! -d "$stack_dir" ]]; then _log EXIT "Stack '$stack_name' not found at $stack_dir"; fi
 
     _log WARN "This will PERMANENTLY delete '$stack_name' and ALL associated appdata."
-    _confirm_no "Confirm DELETE of $stack_dir?" || { _log INFO "Cancelled."; return 0; }
+    if ! _confirm_no "Confirm DELETE of $stack_dir?"; then _log INFO "Cancelled."; return 0; fi
 
     _log STEP "stack_delete: calling _del_safe"
     _del_safe "$stack_name"
@@ -497,10 +520,10 @@ stack_recreate() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
     _log STEP "stack_recreate: name=$stack_name, dir=$stack_dir"
-    [[ -d "$stack_dir" ]] || _log EXIT "Stack '$stack_name' not found."
+    if [[ ! -d "$stack_dir" ]]; then _log EXIT "Stack '$stack_name' not found."; fi
 
     _log WARN "This will destroy the current stack directory and create a fresh one."
-    _confirm_no "Confirm RECREATE for '$stack_name'?" || { _log INFO "Cancelled."; return 0; }
+    if ! _confirm_no "Confirm RECREATE for '$stack_name'?"; then _log INFO "Cancelled."; return 0; fi
 
     _log STEP "stack_recreate: calling _del_safe then stack_create"
     _del_safe "$stack_name"
@@ -512,7 +535,10 @@ stack_purge() {
 
     if [[ ${#target_stacks[@]} -eq 0 ]]; then
         _log WARN "No stacks specified. Gathering ALL stacks for purge."
-        _confirm_no "Are you sure you want to iterate through ALL stacks?" || { _log INFO "Cancelled."; return 0; }
+        if ! _confirm_no "Are you sure you want to iterate through ALL stacks?"; then
+            _log INFO "Cancelled."
+            return 0
+        fi
         while IFS= read -r -d '' d; do
             target_stacks+=("$(basename "$d")")
         done < <(find "$csm_dir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print0)
@@ -520,7 +546,7 @@ stack_purge() {
 
     for stack in "${target_stacks[@]}"; do
         local d; d="$(_get_stack_dir "$stack")"
-        [[ -d "$d" ]] || continue
+        if [[ ! -d "$d" ]]; then continue; fi
 
         _log STEP "Evaluating: $stack"
 
@@ -739,9 +765,11 @@ secret_create() {
     local secret_file="${csm_secrets}/${name}.secret"
 
     _log STEP "secret_create: name=$name, file=$secret_file"
-    [[ -n "$name" ]] || _log EXIT "Secret name is required."
+    if [[ ! -n "$name" ]]; then _log EXIT "Secret name is required."; fi
 
-    [[ ! -d "$csm_secrets" ]] && _log EXIT "The csm_secrets directory does not exist. Unable to create backup secret, exiting."
+    if [[ ! -d "$csm_secrets" ]]; then
+        _log EXIT "The csm_secrets directory does not exist. Unable to create backup secret, exiting."
+    fi
 
     _log STEP "secret_create: checking swarm status..."
     _detect_swarm || _log EXIT "Swarm must be active to create Docker secrets."
@@ -752,10 +780,10 @@ secret_create() {
 
     if [[ -f "$secret_file" ]]; then
         _log STEP "secret_create: using existing file $secret_file"
-        [[ ! -L "$secret_file" ]] || _log EXIT "Refusing symlinked secret file: $secret_file"
-        [[ -r "$secret_file" ]] || _log EXIT "Secret file exists but is not readable: $secret_file"
+        if [[ -L "$secret_file" ]]; then _log EXIT "Refusing symlinked secret file: $secret_file"; fi
+        if [[ ! -r "$secret_file" ]]; then _log EXIT "Secret file exists but is not readable: $secret_file"; fi
         local perms="$(stat -c '%a' "$secret_file" 2>/dev/null || stat -f '%Lp' "$secret_file" 2>/dev/null || true)"
-        [[ "$perms" == "600" ]] || _log WARN "Secret file permissions are $perms, expected 600."
+        if [[ ! "$perms" == "600" ]]; then _log WARN "Secret file permissions are $perms, expected 600."; fi
         _log STEP "secret_create: running docker secret create $name $secret_file"
         docker secret create "$name" "$secret_file" \
             && _log PASS "Docker secret '$name' created from $secret_file." \
@@ -766,7 +794,10 @@ secret_create() {
     if [[ ! -t 0 ]]; then
         _log STEP "secret_create: reading from stdin"
         _safe_secret "$secret_file"
-        [[ -s "$secret_file" ]] || { rm -f "$secret_file"; _log EXIT "Secret value is required."; }
+        if [[ ! -s "$secret_file" ]]; then
+            rm -f "$secret_file"
+            _log EXIT "Secret value is required."
+        fi
 
         docker secret create "$name" "$secret_file" \
             && _log PASS "Docker secret '$name' created from stdin (saved to $secret_file)." \
@@ -778,7 +809,7 @@ secret_create() {
     local value=""
     read -r -s -p "Enter secret value for '$name': " value
     printf '\n' >&2
-    [[ -n "$value" ]] || _log EXIT "Secret value is required."
+    if [[ ! -n "$value" ]]; then _log EXIT "Secret value is required."; fi
 
     _safe_secret "$secret_file" "$value"
 
@@ -796,8 +827,11 @@ secret_remove() {
     _log STEP "secret_remove: checking swarm status..."
     _detect_swarm || _log EXIT "Swarm must be active to remove Docker secrets."
     _log STEP "secret_remove: name=$name, file=$secret_file"
-    [[ -n "$name" ]] || _log EXIT "Secret name is required."
-    _confirm_no "Remove Docker secret '$name' and backup file?" || { _log INFO "Cancelled."; return 0; }
+    if [[ ! -n "$name" ]]; then _log EXIT "Secret name is required."; fi
+    if ! _confirm_no "Remove Docker secret '$name' and backup file?"; then
+        _log INFO "Cancelled."
+        return 0
+    fi
     _log STEP "secret_remove: checking swarm status..."
     _detect_swarm || _log EXIT "Swarm must be active to remove Docker secrets."
     if ! docker secret inspect "$name" >/dev/null 2>&1; then
@@ -808,7 +842,7 @@ secret_remove() {
         && _log PASS "Docker secret '$name' removed." \
         || _log EXIT "Failed to remove Docker secret '$name' (it may still be attached to a service)."
     if [[ -f "$secret_file" ]]; then
-        [[ ! -L "$secret_file" ]] || _log EXIT "Refusing symlinked secret file: $secret_file"
+        if [[ -L "$secret_file" ]]; then _log EXIT "Refusing symlinked secret file: $secret_file"; fi
         _log STEP "secret_remove: removing backup file $secret_file"
         rm -f "$secret_file" \
             && _log PASS "Backup secret file removed: $secret_file" \
@@ -834,7 +868,7 @@ secret_list() {
 stack_list() {
     _log STEP "stack_list: csm_dir=$csm_dir"
     _check_cmd
-    [[ -d "$csm_dir" ]] || _log EXIT "Stacks directory not found: $csm_dir"
+    if [[ ! -d "$csm_dir" ]]; then _log EXIT "Stacks directory not found: $csm_dir"; fi
 
     local swarm_active=false
     _detect_swarm && swarm_active=true
@@ -858,7 +892,7 @@ stack_list() {
     local -a swarm_stacks=()
     if $swarm_active; then
         while IFS= read -r s; do
-            [[ -n "$s" ]] && swarm_stacks+=("$s")
+            if [[ -n "$s" ]]; then swarm_stacks+=("$s"); fi
         done < <(docker stack ls 2>/dev/null | awk 'NR>1 {print $1}')
     fi
 
@@ -871,7 +905,7 @@ stack_list() {
             local is_swarm=false
             if $swarm_active; then
                 for s in "${swarm_stacks[@]}"; do
-                    [[ "$s" == "$dir_name" ]] && { is_swarm=true; break; }
+                    if [[ "$s" == "$dir_name" && "$(is_swarm)" == "true" ); then break; fi
                 done
             fi
 
@@ -936,8 +970,8 @@ stack_ps() {
     #     ports="${ports//->[0-9]+\/[a-z]+ /}"
 
     #     # Color status
-    #     [[ "$status" == *"unhealthy"* ]] && status="${red}unhealthy${rst}"
-    #     [[ "$status" == *"healthy"* ]] && status="${grn}healthy${rst}"
+    #     if [[ "$status" == *"unhealthy"* ]]; then status="${red}unhealthy${rst}"; fi
+    #     if [[ "$status" == *"healthy"* ]]; then status="${grn}healthy${rst}"; fi
 
     #     printf "%s\t%s%s%s\t%s\t%s\n" "$id" "$cyn" "$name" "$rst" "$status" "$ports"
     # done < <($csm_cmd ps --all --format "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}" | sort -k2,2)
@@ -1042,7 +1076,7 @@ stack_cd() {
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
     _log STEP "stack_cd: name=$stack_name, dir=$stack_dir"
     _check_cmd
-    [[ -d "$stack_dir" ]] || _log EXIT "Stack '$stack_name' not found at $stack_dir"
+    if [[ ! -d "$stack_dir" ]]; then _log EXIT "Stack '$stack_name' not found at $stack_dir"; fi
     echo "$stack_dir"
 }
 
@@ -1112,7 +1146,7 @@ manage_config() {
         edit)
             local ucfg="${csm_configs}/user.conf"
             _log STEP "manage_config: editing $ucfg"
-            [[ ! -f "$ucfg" ]] && { mkdir -p "$csm_configs"; touch "$ucfg"; }
+            if [[ ! -f "$ucfg" ]]; then mkdir -p "$csm_configs"; touch "$ucfg"; fi
             "${EDITOR:-vi}" "$ucfg"
             ;;
         reload)
@@ -1143,7 +1177,7 @@ manage_module() {
     # case "$action" in
     #     list)
     #         local tdir="${csm_modules}"
-    #         [[ -d "$tdir" ]] || { log WARN "No modules directory: $tdir"; return 0; }
+    #         if [[ ! -d "$tdir" ]]; then log WARN "No modules directory: $tdir"; return 0; fi
     #         log INFO "Available modules:"
     #         find "$tdir" -mindepth 1 -maxdepth 1 -type d | sort | \
     #             while IFS= read -r t; do
@@ -1247,7 +1281,7 @@ main() {
     local cmd="${1:-}"
     _color_setup
     _log STEP "main() called with cmd='$cmd'"
-    [[ -z "$cmd" ]] && { show_help; exit 0; }
+    if [[ -z "$cmd" ]]; then show_help; exit 0; fi
     shift || true
 
     _log STEP "Setting up colors..."

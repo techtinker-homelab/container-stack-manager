@@ -79,30 +79,32 @@ _log() {
         EXIT|FAIL)  color="${red}" ;;
         INFO)       color="${cyn}" ;;
         PASS)       color="${grn}" ;;
-        STEP)       color="${mgn}"; [[ "${csm_debug:-0}" == "1" ]] || return 0 ;;
+        STEP)       color="${mgn}"; if [[ "${csm_debug:-0}" == "0" ]]; then return 0; fi ;;
         WARN)       color="${ylw}" ;;
         *)          color="${ylw}"; level="WARN"
                     message="[Unknown log type: '${level}'] $message"
                     ;;
     esac
     printf "%s %-4s >> %s%s\n" "${color}${bld}" "${level}" "${message}" "${rst}" >&2
-    [[ "$level" == "EXIT" ]] && exit 1
+    if [[ "$level" == "EXIT" ]]; then exit 1; fi
 }
 
 _die() { _log FAIL "$1"; exit 1; }
 
 _confirm_yes() {
-    [[ "$force_install" == 1 ]] && return 0
+    if [[ "$force_install" == 1 ]]; then return 0; fi
     local prompt="${1:-Are you sure?}"
     read -r -p "${ylw}${bld} ${prompt} [Y/n]: ${rst}" reply
-    [[ -z "${reply}" || "${reply,,}" == "y" ]]
+    if [[ -z "${reply}" || "${reply,,}" == "y" ]]; then return 0; fi
+    return 1 # Explicitly return 1 so the script doesn't crash
 }
 
 _confirm_no() {
-    [[ "$force_install" == 1 ]] && return 0
+    if [[ "$force_install" == 1 ]]; then return 0; fi
     local prompt="${1:-Are you sure?}"
     read -r -p "${ylw}${bld}  ${prompt} [y/N]: ${rst}" reply
-    [[ "${reply,,}" == "y" ]]
+    if [[ "${reply,,}" == "y" ]]; then return 0; fi
+    return 1 # Explicitly return 1
 }
 
 # =============================================================================
@@ -155,11 +157,12 @@ declare -A files_to_install=(
     ["${script_dir}/csm.sh"]="${csm_configs}/"
 )
 # example.conf → default.conf (only if default.conf doesn't already exist)
-[[ -f "${script_dir}/example.conf" ]] && \
+if [[ -f "${script_dir}/example.conf" ]]; then
     files_to_install["${script_dir}/example.conf"]="${csm_configs}/"
-# example.env is optional
-[[ -f "${script_dir}/example.env" ]] && \
+fi
+if [[ -f "${script_dir}/example.env" ]]; then
     files_to_install["${script_dir}/example.env"]="${csm_configs}/"
+fi
 
 # =============================================================================
 # 4. PLATFORM DETECTION
@@ -178,7 +181,7 @@ _detect_pkg_manager() {
 }
 
 _install_pkg() {
-    [[ -z "${pkg_mgr:-}" ]] && { _log WARN "No pkg manager – skipping: $*"; return 0; }
+    if [[ -z "${pkg_mgr:-}" ]]; then _log WARN "No pkg manager – skipping: $*"; return 0; fi
     _log STEP "_install_pkg: using $pkg_mgr to install: $*"
     case "$pkg_mgr" in
         apt-get)
@@ -513,8 +516,8 @@ _setup_files() {
 
     # 5. Consolidated Patching Logic
     local targets=()
-    [[ -f "$conf_default" ]] && targets+=("$conf_default")
-    [[ -f "$conf_user" ]] && targets+=("$conf_user")
+    if [[ -f "$conf_default" ]]; then targets+=("$conf_default"); fi
+    if [[ -f "$conf_user" ]]; then targets+=("$conf_user"); fi
     if [[ ${#targets[@]} -gt 0 ]]; then
         _log STEP "_setup_files: patching runtime variables..."
         sed -i  -e "s|^CSM_CONTAINER_RUNTIME=.*|CSM_CONTAINER_RUNTIME=${csm_runtime}|" \
@@ -533,7 +536,10 @@ _setup_network() {
 
     # Determine binary based on detected runtime
     local cmd="$csm_runtime"
-    [[ -z "$cmd" ]] && { _log WARN "No container runtime detected. Skipping network setup."; return 1; }
+    if [[ -z "$cmd" ]]; then
+        _log WARN "No container runtime detected. Skipping network setup."
+        return 1
+    fi
 
     # Check if the network already exists
     if $var_sudo "$cmd" network inspect "$net_name" >/dev/null 2>&1; then
@@ -689,14 +695,14 @@ EOF
 
 main() {
     _color_setup
-    # [[ -z "${1:-}" ]] && { show_help; exit 0; }
+    # if [[ -z "${1:-}" ]]; then show_help; exit 0; fi
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "${1:-}" in
             # -d | --dryrun)      dry_run=1; csm_debug=1; shift ;; # TODO: implement dry run feature
             -f | --force)       force_install=1; shift ;;
             -h | --help )       show_help; exit 0 ;;
-            -i | --install)     : ;;
+            # -i | --install)     : ;;
             -u | --uninstall)   uninstall_mode=1; shift ;;
             -V | --version)     _log PASS "Container Stack Manager Installer, csm-install.sh version: ${INSTALLER_VERSION}"; exit 0 ;;
             *) _log WARN "Unknown argument: $1 \n Use './csm-install.sh help' to view supported options."; shift ;;
@@ -708,7 +714,9 @@ main() {
         _uninstall_csm
     fi
     _log INFO "CSM Installer v${INSTALLER_VERSION} – starting"
-    [[ "$force_install" == 1 ]] && _log WARN "FORCE MODE ACTIVE: Existing configs will be overwritten and prompts bypassed."
+    if [[ "$force_install" == 1 ]]; then
+        _log WARN "FORCE MODE ACTIVE: Existing configs will be overwritten and prompts bypassed."
+    fi
 
     _log INFO "Install root: ${csm_dir}"
     _log INFO "Invoking user: ${csm_owner} (UID ${csm_uid})"
@@ -738,8 +746,9 @@ main() {
     _log INFO "  1. Edit user config : ${csm_configs}/user.conf"
     _log INFO "  2. View your stacks : ${csm_dir}/"
     _log INFO "  3. Get started      : csm --help"
-    [[ "$csm_runtime" == "docker" ]] && [[ "$(groups)" != *docker* ]] && \
+    if [[ "$csm_runtime" == "docker" && "$(groups)" != *docker* ]]; then
         _log WARN "Remember to log out and back in so your docker group membership takes effect."
+    fi
 }
 
 main "$@"
