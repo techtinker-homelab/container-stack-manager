@@ -696,6 +696,7 @@ main() {
             # -d | --dryrun)      dry_run=1; csm_debug=1; shift ;; # TODO: implement dry run feature
             -f | --force)       force_install=1; shift ;;
             -h | --help )       show_help; exit 0 ;;
+            -i | --install)     continue ;;
             -u | --uninstall)   uninstall_mode=1; shift ;;
             -V | --version)     _log PASS "Container Stack Manager Installer, csm-install.sh version: ${INSTALLER_VERSION}"; exit 0 ;;
             *) _log WARN "Unknown argument: $1 \n Use './csm-install.sh help' to view supported options."; shift ;;
