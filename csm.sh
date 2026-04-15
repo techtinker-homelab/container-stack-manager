@@ -905,7 +905,7 @@ stack_list() {
             local is_swarm=false
             if $swarm_active; then
                 for s in "${swarm_stacks[@]}"; do
-                    if [[ "$s" == "$dir_name" && "$(is_swarm)" == "true" ); then break; fi
+                    if [[ "$s" == "$dir_name" && "$(is_swarm)" == "true" ]]; then break; fi
                 done
             fi
 
