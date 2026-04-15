@@ -40,7 +40,7 @@ fi
 #   9.  Symlink /usr/local/bin/csm → CSM_DIR/.configs/csm.sh
 #  10.  Set final ownership
 
-readonly INSTALLER_VERSION="0.3.0"
+readonly INSTALLER_VERSION="0.3.1"
 
 force_install=0
 uninstall_mode=0
@@ -267,6 +267,57 @@ _install_container_runtime() {
         "")       _install_docker ;;
         *)        _die "Invalid choice. Aborting." ;;
     esac
+    if [[ "$csm_runtime" == "docker" ]]; then
+        _configure_swarm
+    fi
+}
+
+_configure_swarm() {
+    _log STEP "_configure_swarm: configuring Docker deployment mode..."
+
+    _log INFO "Choose your Docker deployment mode:"
+    _log INFO "  1) Local Compose (Standard)"
+    _log INFO "  2) Docker Swarm (Orchestration)"
+    local choice=""
+    read -r -p "${ylw}${bld} Select [1/2] (default 1): ${rst}" choice
+
+    case "$choice" in
+        2|swarm)
+            _log STEP "_configure_swarm: Swarm mode selected."
+
+            # Check if already in a swarm
+            if $var_sudo docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null | grep -q "active"; then
+                _log PASS "Docker is already active in Swarm mode."
+                return 0
+            fi
+
+            _log INFO "Docker is not currently in Swarm mode."
+            if _confirm_yes "Join an existing Swarm cluster?"; then
+                local token ip
+                read -r -p "Enter Swarm Join Token: " token
+                read -r -p "Enter Manager IP (e.g., 192.168.1.10): " ip
+
+                if [[ -n "$token" && -n "$ip" ]]; then
+                    _log STEP "_configure_swarm: joining swarm at $ip..."
+                    $var_sudo docker swarm join --token "$token" "$ip:2377" \
+                        && _log PASS "Successfully joined the Swarm cluster." \
+                        || _log FAIL "Failed to join the Swarm cluster."
+                else
+                    _log WARN "Token or IP missing. Skipping join process."
+                fi
+            elif _confirm_yes "Initialize this node as a Swarm Manager?"; then
+                _log STEP "_configure_swarm: initializing swarm..."
+                $var_sudo docker swarm init \
+                    && _log PASS "Swarm initialized. This node is now a Manager." \
+                    || _log FAIL "Failed to initialize Swarm."
+            else
+                _log INFO "No Swarm action taken. Node remains in Local mode."
+            fi
+            ;;
+        *)
+            _log INFO "Local Compose mode selected (default)."
+            ;;
+    esac
 }
 
 # =============================================================================
@@ -353,7 +404,7 @@ _create_runtime_group() {
 }
 
 # =============================================================================
-# 8. DIRECTORY STRUCTURE
+# 8. CONTAINER DIRECTORIES AND NETWORKING
 # =============================================================================
 
 _install_dir() {
@@ -423,7 +474,7 @@ _setup_files() {
     # 1. Install the core script
     _install_file "${script_dir}/csm.sh" "${csm_configs}/" "$mode_exec" --force
 
-# 2. Handle Env Templates
+    # 2. Handle Env Templates
     if [[ -f "$env_example" ]]; then
         _install_file "$env_example" "${csm_configs}/" "$mode_conf"
         if [[ ! -f "$env_local" || "$force_install" == 1 ]]; then
@@ -467,12 +518,54 @@ _setup_files() {
     if [[ ${#targets[@]} -gt 0 ]]; then
         _log STEP "_setup_files: patching runtime variables..."
         sed -i  -e "s|^CSM_CONTAINER_RUNTIME=.*|CSM_CONTAINER_RUNTIME=${csm_runtime}|" \
+                -e "s|^CSM_ROOT_DIR=.*|CSM_ROOT_DIR=\"${csm_dir}\"|" \
                 -e "s|^CSM_STACKS_GID=.*|CSM_STACKS_GID=${csm_gid}|" \
                 -e "s|^CSM_STACKS_UID=.*|CSM_STACKS_UID=${csm_uid}|" \
                 "${targets[@]}"
     fi
 
     _log INFO "_setup_files: done"
+}
+
+_setup_network() {
+    local net_name="${CSM_NETWORK_NAME:-csm_network}"
+    _log STEP "_setup_network: ensuring network '$net_name' exists..."
+
+    # Determine binary based on detected runtime
+    local cmd="$csm_runtime"
+    [[ -z "$cmd" ]] && { _log WARN "No container runtime detected. Skipping network setup."; return 1; }
+
+    # Check if the network already exists
+    if $var_sudo "$cmd" network inspect "$net_name" >/dev/null 2>&1; then
+        _log INFO "Network '$net_name' already exists."
+        return 0
+    fi
+
+    case "$csm_runtime" in
+        podman)
+            _log STEP "_setup_network: creating podman network $net_name"
+            $var_sudo podman network create "$net_name" \
+                && _log PASS "Podman network '$net_name' created." \
+                || _log WARN "Failed to create Podman network '$net_name'."
+            ;;
+        docker)
+            # Check if Swarm is active to determine network driver
+            if $var_sudo docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null | grep -q "active"; then
+                _log STEP "_setup_network: creating docker swarm overlay network $net_name"
+                $var_sudo docker network create --driver overlay --attachable "$net_name" \
+                    && _log PASS "Docker Swarm network '$net_name' created." \
+                    || _log WARN "Failed to create Docker Swarm network '$net_name'."
+            else
+                _log STEP "_setup_network: creating docker bridge network $net_name"
+                $var_sudo docker network create "$net_name" \
+                    && _log PASS "Docker network '$net_name' created." \
+                    || _log WARN "Failed to create Docker network '$net_name'."
+            fi
+            ;;
+        *)
+            _log WARN "Unsupported runtime '$csm_runtime' for network setup."
+            ;;
+    esac
 }
 
 # =============================================================================
@@ -627,6 +720,8 @@ main() {
     _check_container_service
     _log STEP "main: creating runtime group..."
     _create_runtime_group
+    _log STEP "main: setting up network..."
+    _setup_network
     _log STEP "main: setting up directories..."
     _setup_directories
     _log STEP "main: installing files..."
