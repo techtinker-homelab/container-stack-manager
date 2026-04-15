@@ -431,7 +431,7 @@ _install_file() {
                 ;;
             *)
                 # -v: verbose, -C: only copy if different, -p: preserve timestamps
-                $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -C -p "$src" "$dest_dir/"
+                $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -p "$src" "$dest_dir/"
         esac
         _log INFO "Installed: $filename → $dest_dir"
     else
