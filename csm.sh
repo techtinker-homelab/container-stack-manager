@@ -215,6 +215,7 @@ _detect_scope() {
 
 _load_config() {
     _log STEP "_load_config: loading config files..."
+    csm_configs="${script_dir}/.configs"
     local config_paths=(
         "${csm_configs}"
         "${HOME}/.config/csm"
