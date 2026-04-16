@@ -40,8 +40,6 @@ fi
 #   9.  Symlink /usr/local/bin/csm → CSM_DIR/.configs/csm.sh
 #  10.  Set final ownership
 
-readonly INSTALLER_VERSION="0.3.1"
-
 force_install=0
 uninstall_mode=0
 
@@ -200,12 +198,12 @@ _install_pkg() {
 }
 
 _get_group() {
-    local file="$1"
+    local file="${1:-}"
     stat -c '%G' "$file" 2>/dev/null || stat -f '%Sg' "$file"
 }
 
 _get_perms() {
-    local file="$1"
+    local file="${1:-}"
     stat -c '%A' "$file" 2>/dev/null || stat -f '%Sp' "$file"
 }
 
@@ -411,7 +409,7 @@ _create_runtime_group() {
 # =============================================================================
 
 _install_dir() {
-    local tgt="$1" mode="$2"
+    local tgt="${1:-}" mode="${2:-}"
     if [[ ! -d "$tgt" ]]; then
         _log STEP "_install_dir: creating $tgt (mode=$mode)"
         $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -d "$tgt"
@@ -431,7 +429,7 @@ _install_file() {
                 ;;
             *)
                 # -v: verbose, -C: only copy if different, -p: preserve timestamps
-                $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -p "$src" "$dest_dir/"
+                $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -C "$src" "$dest_dir/"
         esac
         _log INFO "Installed: $filename → $dest_dir"
     else
@@ -675,7 +673,7 @@ _uninstall_csm() {
 
 show_help() {
     cat <<EOF
-${bld}Container Stack Manager (CSM) Installer v${INSTALLER_VERSION}${rst}
+${bld}Container Stack Manager (CSM) Installer v${CSM_VERSION}${rst}
 
 ${bld}Usage:${rst} ${script_dir}/csm-install.sh [options]
 
@@ -685,7 +683,7 @@ ${bld}Options:${rst}
     -u | --uninstall    Uninstall all CSM scripts and unmodified config files.
     -V | --version      Show installer version.
 
-${bld}Container Stack Manager Installer (csm-install.sh) version:${rst} ${ylw}${INSTALLER_VERSION}${rst}
+${bld}Container Stack Manager Installer version:${rst} ${ylw}${CSM_VERSION}${rst}
 EOF
 }
 
@@ -704,7 +702,7 @@ main() {
             -h | --help )       show_help; exit 0 ;;
             # -i | --install)     : ;;
             -u | --uninstall)   uninstall_mode=1; shift ;;
-            -V | --version)     _log PASS "Container Stack Manager Installer, csm-install.sh version: ${INSTALLER_VERSION}"; exit 0 ;;
+            -V | --version)     _log PASS "Container Stack Manager Installer, csm-install.sh version: ${CSM_VERSION}"; exit 0 ;;
             *) _log WARN "Unknown argument: $1 \n Use './csm-install.sh help' to view supported options."; shift ;;
         esac
     done
@@ -713,7 +711,7 @@ main() {
     if [[ "$uninstall_mode" == 1 ]]; then
         _uninstall_csm
     fi
-    _log INFO "CSM Installer v${INSTALLER_VERSION} – starting"
+    _log INFO "Container Stack Manager v${CSM_VERSION} – installer starting"
     if [[ "$force_install" == 1 ]]; then
         _log WARN "FORCE MODE ACTIVE: Existing configs will be overwritten and prompts bypassed."
     fi

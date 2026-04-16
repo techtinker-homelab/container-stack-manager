@@ -41,7 +41,6 @@
 
 set -euo pipefail
 
-readonly CSM_VERSION="0.3.1"
 readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 csm_debug="1" # set to "1" to display debug step messages
@@ -103,7 +102,7 @@ _check_cmd() {
 }
 
 _check_dir() {
-    local dir="$1"
+    local dir="${1:-}"
     if [[ ! -d "$dir" ]]; then return 0; fi # Skip if directory doesn't exist
 
     local owner; owner=$(stat -c '%U' "$dir" 2>/dev/null || stat -f '%Su' "$dir")
@@ -167,7 +166,7 @@ _detect_swarm() {
 }
 
 _detect_scope() {
-    local stack_name="$1"
+    local stack_name="${1:-}"
     local stack_dir="$(_get_stack_dir "$stack_name")"
     _log STEP "_detect_scope: stack_name=$stack_name, stack_dir=$stack_dir"
     _check_cmd
@@ -257,6 +256,8 @@ _load_config() {
     csm_group=$(id -gn "$csm_uid" 2>/dev/null || getent group "$csm_gid" | cut -d: -f1)
     csm_owner=$(id -un "$csm_uid" 2>/dev/null || getent passwd "$csm_uid" | cut -d: -f1)
 
+    csm_version=${CSM_VERSION:-unknown}
+
     _log STEP "_load_config: csm_dir=$csm_dir, csm_cmd will be detected next"
 }
 
@@ -295,8 +296,8 @@ _validate_permissions() {
 
 _require_name() {
     if [[ ! -n "${1:-}" ]]; then _log EXIT "Stack name is required."; fi
-    _log STEP "_require_name: $1"
-    echo "$1"
+    _log STEP "_require_name: ${1:-}"
+    echo "${1:-}"
 }
 
 _get_stack_dir() {
@@ -323,7 +324,7 @@ _fix_permissions() {
 }
 
 _del_safe() {
-    local stack_name="$1"
+    local stack_name="${1:-}"
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
     _log STEP "_del_safe: name=$stack_name, dir=$stack_dir"
     _check_cmd
@@ -739,7 +740,7 @@ stack_update() {
 # =============================================================================
 
 _safe_secret() {
-    local secret_file="$1"
+    local secret_file="${1:-}"
     local value="${2-}"
     local old_umask
     local rc
@@ -761,7 +762,7 @@ _safe_secret() {
 }
 
 secret_create() {
-    local name="$1"
+    local name="${1:-}"
     local secret_file="${csm_secrets}/${name}.secret"
 
     _log STEP "secret_create: name=$name, file=$secret_file"
@@ -822,7 +823,7 @@ secret_create() {
 }
 
 secret_remove() {
-    local name="$1"
+    local name="${1:-}"
     local secret_file="${csm_secrets}/${name}.secret"
     _log STEP "secret_remove: checking swarm status..."
     _detect_swarm || _log EXIT "Swarm must be active to remove Docker secrets."
@@ -1221,7 +1222,7 @@ ALIAS
 
 show_help() {
     cat <<EOF
-${bld}Container Stack Manager (CSM) v${CSM_VERSION}${rst}
+${bld}Container Stack Manager (CSM) v${csm_version}${rst}
 
 ${bld}Usage:${rst} csm <command> [<stack-name>] [options]
 
@@ -1269,7 +1270,7 @@ ${bld}Options:${rst}
     -V | --version         Show version
     --aliases              Print shell aliases to eval in your shell rc
 
-${bld}Container Stack Manager (csm.sh) version:${rst} ${ylw}${CSM_VERSION}${rst}
+${bld}Container Stack Manager (csm.sh) version:${rst} ${ylw}${csm_version}${rst}
 EOF
 }
 
@@ -1291,7 +1292,7 @@ main() {
     case "$cmd" in
         -a | --aliases)         _print_aliases; exit 0 ;;
         -h | --help | h | help) show_help; exit 0 ;;
-        -v | --version)         echo "CSM v${CSM_VERSION}"; exit 0 ;;
+        -v | --version)         echo "CSM v${csm_version}"; exit 0 ;;
     esac
 
     _log STEP "Validating config..."
