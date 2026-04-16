@@ -5,7 +5,26 @@
 
 set -euo pipefail
 
-# .lock file created to prevent duplicate installer scripts running concurrently
+# =============================================================================
+# INSTALL SCRIPT OPERATIONS
+# =============================================================================
+
+# What this script does (in order):
+#   - Validate root / sudo access
+#   - Detect OS package manager
+#   - Detect or install container runtime (Docker or Podman)
+#   - Check / start the container service
+#   - Check / create the docker user + group (UID/GID 2000, Docker only)
+#   - Create the CSM directory structure with correct permissions
+#   - Install core CSM files
+#   - Create ~/stacks symlink pointing to CSM_DIR
+#   - Symlink /usr/local/bin/csm → CSM_DIR/.configs/csm.sh
+#   - Set final ownership
+
+# =============================================================================
+# CREATE LOCKFILE TO PREVENT DUPLICATE CONCURRENT INSTALLATIONS
+# =============================================================================
+
 LOCKFILE="/var/lock/csm-install.lock"
 if ! command -v flock >/dev/null 2>&1; then
     echo "WARNING: flock not found – install util-linux or coreutils for safety." >&2
@@ -17,9 +36,19 @@ if ! flock -n 200; then
     exit 1
 fi
 
-# Prevent sourcing — must be executed directly
+# =============================================================================
+# CLEAN START FOR INSTALLATION VARIABLES
+# =============================================================================
+
+force_install=0
+uninstall_mode=0
+
+# =============================================================================
+# ENSURE SCRIPT NOT SOURCED
+# =============================================================================
+
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    : # running directly, proceed
+    readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 else
     echo "ERROR: This script must be executed directly, not sourced." >&2
     echo "Run: bash csm-install.sh  (or ./csm-install.sh)" >&2
@@ -27,26 +56,22 @@ else
 fi
 
 # =============================================================================
+# PRIVILEGE CHECK
+# =============================================================================
 
-# What this script does (in order):
-#   1.  Validate root / sudo access
-#   2.  Detect OS package manager
-#   3.  Detect or install container runtime (Docker or Podman)
-#   4.  Check / start the container service
-#   5.  Check / create the docker user + group (UID/GID 2000, Docker only)
-#   6.  Create the CSM directory structure with correct permissions
-#   7.  Install core CSM files
-#   8.  Create ~/stacks symlink pointing to CSM_DIR
-#   9.  Symlink /usr/local/bin/csm → CSM_DIR/.configs/csm.sh
-#  10.  Set final ownership
-
-force_install=0
-uninstall_mode=0
-
-csm_runtime=""   # set by _detect_container_runtime or _install_container_runtime
+if [[ "$(id -u)" -eq 0 ]]; then
+    var_sudo=""
+    running_as_root=true
+elif command -v sudo >/dev/null 2>&1; then
+    var_sudo="sudo"
+    running_as_root=false
+else
+    printf "This installer requires root or sudo. Neither is available."
+    exit 1
+fi
 
 # =============================================================================
-# 0. HELPER FUNCTIONS
+# HELPER FUNCTIONS
 # =============================================================================
 
 _tput_safe() { command -v tput >/dev/null 2>&1 && tput "$@" 2>/dev/null || true; }
@@ -106,64 +131,54 @@ _confirm_no() {
 }
 
 # =============================================================================
-# 1. PRIVILEGE CHECK
+# CONFIGURATION  (override via env vars before calling the script)
 # =============================================================================
 
-if [[ "$(id -u)" -eq 0 ]]; then
-    var_sudo=""
-    running_as_root=true
-elif command -v sudo >/dev/null 2>&1; then
-    var_sudo="sudo"
-    running_as_root=false
-else
-    _die "This installer requires root or sudo. Neither is available."
-fi
+_vars_setup() {
+    # Define required variables from .ini file
+    source $script_dir/csm.ini
+
+    # Set desired container runtime daemon if defined in .ini
+    csm_runtime="${CSM_CONTAINER_RUNTIME:-}"
+
+    # Define script variables with defaults
+    export csm_dir="${CSM_ROOT_DIR:-/srv/stacks}"
+    export csm_backups="${CSM_BACKUPS_DIR:-${csm_dir}/.backups}"
+    export csm_configs="${CSM_CONFIGS_DIR:-${csm_dir}/.configs}"
+    export csm_modules="${CSM_MODULES_DIR:-${csm_dir}/.modules}"
+    export csm_secrets="${CSM_SECRETS_DIR:-${csm_dir}/.secrets}"
+    export csm_version="${CSM_VERSION:-undefined}"
+
+    # Owner — when run via sudo, use the invoking user; else current user
+    csm_owner="${SUDO_USER:-$(id -un)}"
+    csm_group="docker"   # default, overridden after runtime detection
+    csm_uid="${SUDO_UID:-$(id -u)}"
+    csm_gid=2000         # default, overridden by _create_runtime_group
+
+    readonly csm_link="${HOME}/stacks"
+    readonly bin_link="/usr/local/bin/csm"
+
+    # Permission modes (symbolic form — compatible with GNU and BSD install)
+    readonly mode_dir="775"  # directories:  rwxrwxr-x
+    readonly mode_exec="770" # executables:  rwxrwx---
+    readonly mode_conf="660" # config files: rw-rw----
+    readonly mode_auth="600" # secret files: rw-------
+
+    # Files to install: source → destination directory
+    declare -A files_to_install=(
+        ["${script_dir}/csm.sh"]="${csm_configs}/"
+    )
+    # example.conf → default.conf (only if default.conf doesn't already exist)
+    if [[ -f "${script_dir}/example.conf" ]]; then
+        files_to_install["${script_dir}/example.conf"]="${csm_configs}/"
+    fi
+    if [[ -f "${script_dir}/example.env" ]]; then
+        files_to_install["${script_dir}/example.env"]="${csm_configs}/"
+    fi
+}
 
 # =============================================================================
-# 2. LOCATE SCRIPT + SOURCE FILES
-# =============================================================================
-
-readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-
-# =============================================================================
-# 3. CONFIGURATION  (override via env vars before calling the script)
-# =============================================================================
-
-export csm_dir="${CSM_ROOT_DIR:-/srv/stacks}"
-export csm_backups="${CSM_BACKUPS_DIR:-${csm_dir}/.backups}"
-export csm_configs="${CSM_CONFIGS_DIR:-${csm_dir}/.configs}"
-export csm_modules="${CSM_MODULES_DIR:-${csm_dir}/.modules}"
-export csm_secrets="${CSM_SECRETS_DIR:-${csm_dir}/.secrets}"
-
-# Owner — when run via sudo, use the invoking user; else current user
-csm_owner="${SUDO_USER:-$(id -un)}"
-csm_group="docker"   # default, overridden after runtime detection
-csm_uid="${SUDO_UID:-$(id -u)}"
-csm_gid=2000         # default, overridden by _create_runtime_group
-
-readonly csm_link="${HOME}/stacks"
-readonly bin_link="/usr/local/bin/csm"
-
-# Permission modes (symbolic form — compatible with GNU and BSD install)
-readonly mode_dir="775"  # directories:  rwxrwxr-x
-readonly mode_exec="770" # executables:  rwxrwx---
-readonly mode_conf="660" # config files: rw-rw----
-readonly mode_auth="600" # secret files: rw-------
-
-# Files to install: source → destination directory
-declare -A files_to_install=(
-    ["${script_dir}/csm.sh"]="${csm_configs}/"
-)
-# example.conf → default.conf (only if default.conf doesn't already exist)
-if [[ -f "${script_dir}/example.conf" ]]; then
-    files_to_install["${script_dir}/example.conf"]="${csm_configs}/"
-fi
-if [[ -f "${script_dir}/example.env" ]]; then
-    files_to_install["${script_dir}/example.env"]="${csm_configs}/"
-fi
-
-# =============================================================================
-# 4. PLATFORM DETECTION
+# PLATFORM DETECTION
 # =============================================================================
 
 _detect_pkg_manager() {
@@ -208,7 +223,7 @@ _get_perms() {
 }
 
 # =============================================================================
-# 5. CONTAINER RUNTIME DETECTION / INSTALLATION
+# CONTAINER RUNTIME DETECTION / INSTALLATION
 # =============================================================================
 
 _detect_container_runtime() {
@@ -322,7 +337,7 @@ _configure_swarm() {
 }
 
 # =============================================================================
-# 6. CONTAINER SERVICE CHECK
+# CONTAINER SERVICE CHECK
 # =============================================================================
 
 _check_container_service() {
@@ -370,7 +385,7 @@ _check_container_service() {
 }
 
 # =============================================================================
-# 7. DOCKER USER / GROUP  (UID/GID 2000, Docker only)
+# DOCKER USER / GROUP  (UID/GID 2000, Docker only)
 # =============================================================================
 
 _create_runtime_group() {
@@ -405,7 +420,7 @@ _create_runtime_group() {
 }
 
 # =============================================================================
-# 8. CONTAINER DIRECTORIES AND NETWORKING
+# CONTAINER DIRECTORIES AND NETWORKING
 # =============================================================================
 
 _install_dir() {
@@ -472,10 +487,10 @@ _setup_files() {
     local env_local="${csm_configs}/.local.env"
     local env_swarm="${csm_configs}/.swarm.env"
 
-    # 1. Install the core script
+    # Install the core script
     _install_file "${script_dir}/csm.sh" "${csm_configs}/" "$mode_exec" --force
 
-    # 2. Handle Env Templates
+    # Handle Env Templates
     if [[ -f "$env_example" ]]; then
         _install_file "$env_example" "${csm_configs}/" "$mode_conf"
         if [[ ! -f "$env_local" || "$force_install" == 1 ]]; then
@@ -487,7 +502,7 @@ _setup_files() {
         _log INFO "Initial setup: Created/Overwrote local and swarm .env templates"
     fi
 
-    # 3. Handle Compose Templates
+    # Handle Compose Templates
     if [[ -f "$compose_example" ]]; then
         _install_file "$compose_example" "${csm_configs}/" "$mode_conf"
         if [[ ! -f "$compose_local" || "$force_install" == 1 ]]; then
@@ -499,7 +514,7 @@ _setup_files() {
         _log INFO "Initial setup: Created/Overwrote local and swarm compose templates"
     fi
 
-    # 4. Handle Core Configurations
+    # Handle Core Configurations
     if [[ -f "$conf_example" ]]; then
         _install_file "$conf_example" "${csm_configs}/" "$mode_conf" --force
         if [[ ! -f "$conf_default" || "$force_install" == 1 ]]; then
@@ -512,7 +527,7 @@ _setup_files() {
         _log INFO "Initial setup: Created/Overwrote $conf_user"
     fi
 
-    # 5. Consolidated Patching Logic
+    # Consolidated Patching Logic
     local targets=()
     if [[ -f "$conf_default" ]]; then targets+=("$conf_default"); fi
     if [[ -f "$conf_user" ]]; then targets+=("$conf_user"); fi
@@ -573,13 +588,13 @@ _setup_network() {
 }
 
 # =============================================================================
-# 9. SYMLINKS
+# SYMLINKS
 # =============================================================================
 
 _setup_symlinks() {
     _log STEP "_setup_symlinks: setting up symlinks..."
 
-    # 1. Convenience Link: ~/stacks -> CSM_ROOT_DIR
+    # Convenience Link: ~/stacks -> CSM_ROOT_DIR
     local link_source="$csm_link"
     local link_target="$csm_dir"
 
@@ -595,7 +610,7 @@ _setup_symlinks() {
         _log INFO "Created symlink: $link_source"
     fi
 
-    # 2. Binary Link: /usr/local/bin/csm -> .configs/csm.sh
+    # Binary Link: /usr/local/bin/csm -> .configs/csm.sh
     local bin_source="$bin_link"
     local bin_target="${csm_configs}/csm.sh"
 
@@ -632,7 +647,7 @@ _set_ownership() {
 }
 
 # =============================================================================
-# 11. UNINSTALL
+# UNINSTALL
 # =============================================================================
 
 _uninstall_csm() {
@@ -642,7 +657,7 @@ _uninstall_csm() {
 
     _confirm_yes "Proceed with uninstallation?" || { _log INFO "Cancelled."; exit 0; }
 
-    # 1. Remove Symlinks
+    # Remove Symlinks
     if [[ -L "$bin_link" ]]; then
         _log STEP "Removing binary symlink: $bin_link"
         $var_sudo rm -f "$bin_link"
@@ -652,7 +667,7 @@ _uninstall_csm() {
         rm -f "$csm_link"
     fi
 
-    # 2. Remove Core Engine Files
+    # Remove Core Engine Files
     if [[ -f "${csm_configs}/csm.sh" ]]; then
         _log STEP "Removing core script: ${csm_configs}/csm.sh"
         $var_sudo rm -f "${csm_configs}/csm.sh"
@@ -668,7 +683,7 @@ _uninstall_csm() {
 }
 
 # =============================================================================
-# 12. HELP
+# HELP
 # =============================================================================
 
 show_help() {
@@ -688,10 +703,11 @@ EOF
 }
 
 # =============================================================================
-# 13. MAIN
+# MAIN
 # =============================================================================
 
 main() {
+    _vars_setup
     _color_setup
     # if [[ -z "${1:-}" ]]; then show_help; exit 0; fi
     # Parse arguments
