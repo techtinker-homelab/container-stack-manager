@@ -137,7 +137,6 @@ _confirm_no() {
 
 _detect_command() {
     _log STEP "_detect_command: checking for docker compose..."
-    _check_cmd
     if docker compose version >/dev/null 2>&1; then
         csm_cmd="docker"
         _log STEP "_detect_command: using docker"
