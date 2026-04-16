@@ -41,7 +41,11 @@
 
 set -euo pipefail
 
+# =============================================================================
+# INITIAL VARIABLE DEFINITIONS
+# =============================================================================
 readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+source "${script_dir}/csm.ini"
 
 csm_debug="1" # set to "1" to display debug step messages
 csm_cmd=""    # set by _detect_command
@@ -54,7 +58,7 @@ readonly mode_conf="660"   # config files: rw-rw----
 readonly mode_auth="600"   # secrets:      rw-------
 
 # =============================================================================
-# 1. HELPER FUNCTIONS
+# HELPER FUNCTIONS
 # =============================================================================
 
 _tput_safe() { command -v tput >/dev/null 2>&1 && tput "$@" 2>/dev/null || true; }
@@ -132,7 +136,7 @@ _confirm_no() {
 }
 
 # =============================================================================
-# 2. CONFIGURATION
+# CONFIGURATION
 # =============================================================================
 
 _detect_command() {
@@ -291,7 +295,7 @@ _validate_permissions() {
 }
 
 # =============================================================================
-# 3. INTERNAL HELPERS
+# INTERNAL HELPERS
 # =============================================================================
 
 _require_name() {
@@ -350,7 +354,7 @@ _del_safe() {
 }
 
 # =============================================================================
-# 4. STACK LIFECYCLE (public)
+# STACK LIFECYCLE (public)
 # =============================================================================
 
 stack_create() {
@@ -359,7 +363,7 @@ stack_create() {
     local target_scope="local"
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
 
-    # 1. Determine Target Scope
+    # Determine Target Scope
     _log STEP "stack_create: determining target scope..."
     if [[ -n "$user_scope" ]]; then
         target_scope="$user_scope"
@@ -378,7 +382,7 @@ stack_create() {
     install -o "$csm_uid" -g "$csm_gid" -m "$mode_dirs" -d "$stack_dir"/appdata
     install -o "$csm_uid" -g "$csm_gid" -m "$mode_dirs" -d "$stack_dir"
 
-    # 2. Handle Compose File
+    # Handle Compose File
     if [[ -f "$tmpl_compose" ]]; then
         _log STEP "stack_create: copying template $tmpl_compose"
         install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$tmpl_compose" "$stack_dir/compose.yml"
@@ -398,7 +402,7 @@ services:
 EOF
     fi
 
-    # 3. Handle Env File
+    # Handle Env File
     if [[ -f "$tmpl_env" ]]; then
         _log STEP "stack_create: copying env template $tmpl_env"
         install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$tmpl_env" "$stack_dir/.env"
@@ -410,7 +414,7 @@ EOF
     _log STEP "stack_create: fixing permissions"
     _fix_permissions "$stack_name"
 
-    # 4. Lock in the scope with a marker file
+    # Lock in the scope with a marker file
     _log STEP "stack_create: dropping .$target_scope marker file"
     touch "$stack_dir/.$target_scope"
 
@@ -571,7 +575,7 @@ stack_purge() {
 }
 
 # =============================================================================
-# 5. STACK OPERATIONS (public)
+# STACK OPERATIONS (public)
 # =============================================================================
 
 stack_up() {
@@ -736,7 +740,7 @@ stack_update() {
 }
 
 # =============================================================================
-# 6. SECRETS MANAGEMENT (public)
+# SECRETS MANAGEMENT (public)
 # =============================================================================
 
 _safe_secret() {
@@ -863,7 +867,7 @@ secret_list() {
 }
 
 # =============================================================================
-# 7. INFORMATION (public)
+# INFORMATION (public)
 # =============================================================================
 
 stack_list() {
@@ -950,7 +954,7 @@ stack_ps() {
     _detect_swarm && swarm_active=true
     _log STEP "stack_ps: swarm_active=$swarm_active"
 
-    # 1. List all containers with improved formatting
+    # List all containers with improved formatting
     {
         printf "%s%-20s %-30s %-20s %-20s%s\n" "${bld}" "CONTAINER ID" "NAME" "STATUS" "PORTS" "${rst}"
         $csm_cmd ps --all --format "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}" | \
@@ -977,7 +981,7 @@ stack_ps() {
     #     printf "%s\t%s%s%s\t%s\t%s\n" "$id" "$cyn" "$name" "$rst" "$status" "$ports"
     # done < <($csm_cmd ps --all --format "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}" | sort -k2,2)
 
-    # 2. Swarm specific service listings
+    # Swarm specific service listings
     if $swarm_active; then
         local services
         services="$(docker stack ls 2>/dev/null | awk 'NR>1 {print $1}')"
@@ -1123,7 +1127,7 @@ net_info() {
 }
 
 # =============================================================================
-# 7. CONFIG MANAGEMENT (public)
+# CONFIG MANAGEMENT (public)
 # =============================================================================
 
 manage_config() {
@@ -1163,7 +1167,7 @@ manage_config() {
 }
 
 # =============================================================================
-# 8. TEMPLATE MANAGEMENT (public, stub)
+# TEMPLATE MANAGEMENT (public, stub)
 # =============================================================================
 
 manage_module() {
@@ -1196,7 +1200,7 @@ manage_module() {
 }
 
 # =============================================================================
-# 9. SHELL ALIAS GENERATOR
+# SHELL ALIAS GENERATOR
 # =============================================================================
 
 _print_aliases() {
@@ -1217,7 +1221,7 @@ ALIAS
 }
 
 # =============================================================================
-# 10. HELP (public)
+# HELP (public)
 # =============================================================================
 
 show_help() {
@@ -1275,7 +1279,7 @@ EOF
 }
 
 # =============================================================================
-# 11. COMMAND DISPATCHER
+# COMMAND DISPATCHER
 # =============================================================================
 
 main() {
