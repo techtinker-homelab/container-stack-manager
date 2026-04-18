@@ -45,7 +45,6 @@ set -euo pipefail
 # INITIAL VARIABLE DEFINITIONS
 # =============================================================================
 readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-source "${script_dir}/csm.ini"
 
 csm_debug="1" # set to "1" to display debug step messages
 csm_cmd=""    # set by _detect_command
@@ -105,7 +104,7 @@ _check_cmd() {
     fi
 }
 
-_check_dir() {
+_check_permissions() {
     local dir="${1:-}"
     if [[ ! -d "$dir" ]]; then return 0; fi # Skip if directory doesn't exist
 
@@ -216,16 +215,19 @@ _detect_scope() {
     return 0
 }
 
-_load_config() {
-    _log STEP "_load_config: loading config files..."
+_setup_variables() {
+    _log STEP "_setup_variables: loading config files..."
     csm_configs="${script_dir}/.configs"
     local config_paths=(
         "${csm_configs}"
         "${HOME}/.config/csm"
     )
 
+    # Source default variable values
+    if [[ -f "${script_dir}/csm.ini" ]]; then source "${script_dir}/csm.ini"; fi
+
     for dir in "${config_paths[@]}"; do
-        if _check_dir "$dir"; then
+        if _check_permissions "$dir"; then
             for f in "$dir"/*.conf "$dir"/user.conf; do
                 if [[ -f "$f" ]]; then source "$f"; fi
             done
@@ -234,6 +236,7 @@ _load_config() {
         fi
     done
 
+    # Update variables to user-set values if they exist
     for f in \
         "${csm_configs}"/*.conf \
         "${csm_configs}"/user.conf \
@@ -241,19 +244,19 @@ _load_config() {
         "${HOME}"/.config/csm/user.conf
     do
         if [[ -f "$f" ]]; then
-            _log STEP "_load_config: sourcing $f"
+            _log STEP "_setup_variables: sourcing $f"
             source "$f"
         else
-            _log STEP "_load_config: not found $f"
+            _log STEP "_setup_variables: not found $f"
         fi
     done
 
+    # Assign global variables to local script variable names
     csm_dir="${CSM_ROOT_DIR:-/srv/stacks}"
     csm_backups="${CSM_BACKUPS_DIR:-${csm_dir}/.backups}"
     csm_configs="${CSM_CONFIGS_DIR:-${csm_dir}/.configs}"
     csm_secrets="${CSM_SECRETS_DIR:-${csm_dir}/.secrets}"
     csm_modules="${CSM_MODULES_DIR:-${csm_dir}/.modules}"
-
     csm_net_name="${CSM_NETWORK_NAME:-csm_network}"
     csm_gid="${CSM_STACKS_GID:-$(id -g)}"
     csm_uid="${CSM_STACKS_UID:-$(id -u)}"
@@ -262,7 +265,7 @@ _load_config() {
 
     csm_version=${CSM_VERSION:-unknown}
 
-    _log STEP "_load_config: csm_dir=$csm_dir, csm_cmd will be detected next"
+    _log STEP "_setup_variables: csm_dir=$csm_dir, csm_cmd will be detected next"
 }
 
 _validate_config() {
@@ -285,11 +288,12 @@ _validate_permissions() {
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
     _log STEP "_validate_permissions: checking $stack_dir"
     if [[ ! -d "$stack_dir" ]]; then return 0; fi
-    local perm
-    perm=$(stat -c '%a' "$stack_dir" 2>/dev/null || stat -f '%Lp' "$stack_dir")
-    _log STEP "_validate_permissions: got perm=$perm, expected 770"
-    if [[ "$perm" != "770" ]]; then
-        _log WARN "Incorrect permissions on $stack_dir (got $perm, expected 770)"
+    local mode
+    mode="$(stat -c '%a' "$stack_dir" 2>/dev/null || stat -f '%Lp' "$stack_dir" 2>/dev/null || echo "")"
+    if [[ -z "$mode" ]]; then _log WARN "Unable to get permissions for $stack_dir"; return; fi
+    _log STEP "_validate_permissions: got mode=$mode, expected 770"
+    if [[ "$mode" != "770" ]]; then
+        _log WARN "Incorrect permissions on $stack_dir (got $mode, expected 770)"
         _log WARN "Fix manually: chmod 770 \"$stack_dir\" && find \"$stack_dir\" -type f -exec chmod 660 {} \\;"
     fi
 }
@@ -311,11 +315,11 @@ _get_stack_dir() {
     echo "$dir"
 }
 
-_require_compose_file() {
+_ensure_compose_file() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
     local f="${csm_dir}/${stack_name}/compose.yml"
-    _log STEP "_require_compose_file: checking $f"
-    if [[ -f "$f" ]]; then _log EXIT "Compose file not found: $f"; fi
+    _log STEP "_ensure_compose_file: checking $f"
+    if [[ ! -f "$f" ]]; then _log EXIT "Compose file not found: $f"; fi
     echo "$f"
 }
 
@@ -344,7 +348,7 @@ _del_safe() {
         _log STEP "_del_safe: scope=$scope"
         case "$scope" in
             swarm) docker stack rm "$stack_name" 2>/dev/null || true ;;
-            local) $csm_cmd compose -f "${stack_dir}/compose.yml" stop 2>/dev/null || true ;;
+            local) "$csm_cmd" compose -f "${stack_dir}/compose.yml" stop 2>/dev/null || true ;;
         esac
     fi
 
@@ -438,7 +442,7 @@ stack_rename() {
 
 stack_edit() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
-    local f; f="$(_require_compose_file "$stack_name")"
+    local f; f="$(_ensure_compose_file "$stack_name")"
     _log STEP "stack_edit: opening $f with ${EDITOR:-vi}"
     "${EDITOR:-vi}" "$f"
 }
@@ -484,7 +488,7 @@ stack_remove() {
         return 0
     fi
 
-    local f; f="$(_require_compose_file "$stack_name")"
+    local f; f="$(_ensure_compose_file "$stack_name")"
     _log STEP "stack_remove: detecting scope..."
     _detect_scope "$stack_name"
     _log STEP "stack_remove: scope=$scope"
@@ -498,10 +502,10 @@ stack_remove() {
         local)
             local containers
             _log STEP "stack_remove: checking for running containers..."
-            containers=$($csm_cmd compose -f "$f" ps -q 2>/dev/null) || true
+            containers=$("$csm_cmd" compose -f "$f" ps -q 2>/dev/null) || true
             if [[ -n "$containers" ]]; then
                 _log STEP "stack_remove: removing containers..."
-                $csm_cmd compose -f "$f" rm --stop --force
+                "$csm_cmd" compose -f "$f" rm --stop --force
             fi
             _log PASS "Local stack '$stack_name' containers removed."
             ;;
@@ -580,7 +584,7 @@ stack_purge() {
 
 stack_up() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
-    local f; f="$(_require_compose_file "$stack_name")"
+    local f; f="$(_ensure_compose_file "$stack_name")"
     _log STEP "stack_up: name=$stack_name, compose=$f"
     _check_cmd
     _detect_scope "$stack_name"
@@ -594,7 +598,7 @@ stack_up() {
             ;;
         local)
             _log STEP "stack_up: running $csm_cmd compose -f $f up -d --remove-orphans"
-            $csm_cmd compose -f "$f" up -d --remove-orphans \
+            "$csm_cmd" compose -f "$f" up -d --remove-orphans \
                 && _log PASS "Stack '$stack_name' is up." \
                 || _log EXIT "Failed to bring up Local stack '$stack_name'."
             ;;
@@ -603,7 +607,7 @@ stack_up() {
 
 stack_down() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
-    local f; f="$(_require_compose_file "$stack_name")"
+    local f; f="$(_ensure_compose_file "$stack_name")"
     _log STEP "stack_down: name=$stack_name, compose=$f"
     _check_cmd
     _detect_scope "$stack_name"
@@ -617,7 +621,7 @@ stack_down() {
             ;;
         local)
             _log STEP "stack_down: running $csm_cmd compose -f $f down"
-            $csm_cmd compose -f "$f" down \
+            "$csm_cmd" compose -f "$f" down \
                 && _log PASS "Stack '$stack_name' brought down." \
                 || _log EXIT "Failed to bring down Local stack '$stack_name'."
             ;;
@@ -626,7 +630,7 @@ stack_down() {
 
 stack_bounce() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
-    local f; f="$(_require_compose_file "$stack_name")"
+    local f; f="$(_ensure_compose_file "$stack_name")"
     _log STEP "stack_bounce: name=$stack_name, compose=$f"
     _detect_scope "$stack_name"
     _log STEP "stack_bounce: scope=$scope"
@@ -647,7 +651,7 @@ stack_bounce() {
 
 stack_start() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
-    local f; f="$(_require_compose_file "$stack_name")"
+    local f; f="$(_ensure_compose_file "$stack_name")"
     _log STEP "stack_start: name=$stack_name, compose=$f"
     _check_cmd
     _detect_scope "$stack_name"
@@ -661,7 +665,7 @@ stack_start() {
             ;;
         local)
             _log STEP "stack_start: running $csm_cmd compose -f $f start"
-            $csm_cmd compose -f "$f" start \
+            "$csm_cmd" compose -f "$f" start \
                 && _log PASS "Stack '$stack_name' started." \
                 || _log EXIT "Failed to start Local stack '$stack_name'."
             ;;
@@ -670,7 +674,7 @@ stack_start() {
 
 stack_restart() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
-    local f; f="$(_require_compose_file "$stack_name")"
+    local f; f="$(_ensure_compose_file "$stack_name")"
     _log STEP "stack_restart: name=$stack_name, compose=$f"
     _check_cmd
     _detect_scope "$stack_name"
@@ -684,7 +688,7 @@ stack_restart() {
             ;;
         local)
             _log STEP "stack_restart: running $csm_cmd compose -f $f restart"
-            $csm_cmd compose -f "$f" restart \
+            "$csm_cmd" compose -f "$f" restart \
                 && _log PASS "Stack '$stack_name' restarted." \
                 || _log EXIT "Failed to restart Local stack '$stack_name'."
             ;;
@@ -693,7 +697,7 @@ stack_restart() {
 
 stack_stop() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
-    local f; f="$(_require_compose_file "$stack_name")"
+    local f; f="$(_ensure_compose_file "$stack_name")"
     _log STEP "stack_stop: name=$stack_name, compose=$f"
     _check_cmd
     _detect_scope "$stack_name"
@@ -707,7 +711,7 @@ stack_stop() {
             ;;
         local)
             _log STEP "stack_stop: running $csm_cmd compose -f $f stop"
-            $csm_cmd compose -f "$f" stop \
+            "$csm_cmd" compose -f "$f" stop \
                 && _log PASS "Stack '$stack_name' stopped." \
                 || _log EXIT "Failed to stop Local stack '$stack_name'."
             ;;
@@ -716,7 +720,7 @@ stack_stop() {
 
 stack_update() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
-    local f; f="$(_require_compose_file "$stack_name")"
+    local f; f="$(_ensure_compose_file "$stack_name")"
     _log STEP "stack_update: name=$stack_name, compose=$f"
     _check_cmd
     _detect_scope "$stack_name"
@@ -730,9 +734,9 @@ stack_update() {
             ;;
         local)
             _log STEP "stack_update: running $csm_cmd compose -f $f pull"
-            $csm_cmd compose -f "$f" pull
+            "$csm_cmd" compose -f "$f" pull
             _log STEP "stack_update: running $csm_cmd compose -f $f up -d"
-            $csm_cmd compose -f "$f" up -d \
+            "$csm_cmd" compose -f "$f" up -d \
                 && _log PASS "Stack '$stack_name' updated." \
                 || _log EXIT "Failed to update Local stack '$stack_name'."
             ;;
@@ -767,6 +771,7 @@ _safe_secret() {
 
 secret_create() {
     local name="${1:-}"
+    if [[ -z "${name// }" ]]; then _log EXIT "Secret name cannot be empty."; fi
     local secret_file="${csm_secrets}/${name}.secret"
 
     _log STEP "secret_create: name=$name, file=$secret_file"
@@ -910,21 +915,17 @@ stack_list() {
             local is_swarm=false
             if $swarm_active; then
                 for s in "${swarm_stacks[@]}"; do
-                    if [[ "$s" == "$dir_name" && "$(is_swarm)" == "true" ]]; then break; fi
+                    if [[ "$s" == "$dir_name" && "$(_detect_swarm)" == "true" ]]; then break; fi
                 done
             fi
 
             if $is_swarm; then
-                scope_label="swarm"
-                status_color="${grn}"
-                status_label="deployed"
-            elif $csm_cmd compose -f "${stack_dir}/compose.yml" ps --services \
+                scope_label="swarm"; status_color="${grn}"; status_label="deployed"
+            elif "$csm_cmd" compose -f "${stack_dir}/compose.yml" ps --services \
                 --filter status=running 2>/dev/null | grep -q .; then
-                scope_label="local"
-                status_color="${grn}"; status_label="running"
+                scope_label="local"; status_color="${grn}"; status_label="running"
             else
-                scope_label="local"
-                status_color="${ylw}"; status_label="stopped"
+                scope_label="local"; status_color="${ylw}"; status_label="stopped"
             fi
 
             printf "  %s%-24s%s [%s%s%s] %s%s%s\n" \
@@ -957,7 +958,7 @@ stack_ps() {
     # List all containers with improved formatting
     {
         printf "%s%-20s %-30s %-20s %-20s%s\n" "${bld}" "CONTAINER ID" "NAME" "STATUS" "PORTS" "${rst}"
-        $csm_cmd ps --all --format "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}" | \
+        "$csm_cmd" ps --all --format "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}" | \
         sort -k2,2 | \
         sed -E "
             s/^([^ \t]+)\t([^ \t]+)\t([^ \t]+)\t(.+)/\1\t${cyn}\2${rst}\t\3\t\4/
@@ -979,7 +980,7 @@ stack_ps() {
     #     if [[ "$status" == *"healthy"* ]]; then status="${grn}healthy${rst}"; fi
 
     #     printf "%s\t%s%s%s\t%s\t%s\n" "$id" "$cyn" "$name" "$rst" "$status" "$ports"
-    # done < <($csm_cmd ps --all --format "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}" | sort -k2,2)
+    # done < <("$csm_cmd" ps --all --format "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}" | sort -k2,2)
 
     # Swarm specific service listings
     if $swarm_active; then
@@ -999,7 +1000,7 @@ stack_ps() {
 
 stack_status() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
-    local f; f="$(_require_compose_file "$stack_name")"
+    local f; f="$(_ensure_compose_file "$stack_name")"
     _log STEP "stack_status: name=$stack_name, compose=$f"
     _check_cmd
     _detect_scope "$stack_name"
@@ -1010,13 +1011,13 @@ stack_status() {
             docker service ps "$stack_name" ;;
         local)
             _log STEP "stack_status: running $csm_cmd compose -f $f ps"
-            $csm_cmd compose -f "$f" ps ;;
+            "$csm_cmd" compose -f "$f" ps ;;
     esac
 }
 
 stack_validate() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
-    local f; f="$(_require_compose_file "$stack_name")"
+    local f; f="$(_ensure_compose_file "$stack_name")"
     _log STEP "stack_validate: name=$stack_name, compose=$f"
     _check_cmd
     _detect_scope "$stack_name"
@@ -1028,7 +1029,7 @@ stack_validate() {
             ;;
         local)
             _log STEP "stack_validate: running $csm_cmd compose -f $f config -q"
-            if $csm_cmd compose -f "$f" config -q 2>&1; then
+            if "$csm_cmd" compose -f "$f" config -q 2>&1; then
                 _log PASS "Config valid: $f"
             else
                 _log EXIT "Config invalid: $f"
@@ -1039,7 +1040,7 @@ stack_validate() {
 
 stack_inspect() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
-    local f; f="$(_require_compose_file "$stack_name")"
+    local f; f="$(_ensure_compose_file "$stack_name")"
     _log STEP "stack_inspect: name=$stack_name, compose=$f"
     _check_cmd
     _detect_scope "$stack_name"
@@ -1051,14 +1052,14 @@ stack_inspect() {
             ;;
         local)
             _log STEP "stack_inspect: running $csm_cmd compose -f $f config"
-            $csm_cmd compose -f "$f" config
+            "$csm_cmd" compose -f "$f" config
             ;;
     esac
 }
 
 stack_logs() {
     local stack_name; stack_name="$(_require_name "${1:-}")"
-    local f; f="$(_require_compose_file "$stack_name")"
+    local f; f="$(_ensure_compose_file "$stack_name")"
     local lines="${2:-50}"
     _log STEP "stack_logs: name=$stack_name, lines=$lines"
     _check_cmd
@@ -1071,7 +1072,7 @@ stack_logs() {
             ;;
         local)
             _log STEP "stack_logs: running $csm_cmd compose -f $f logs -f --tail=$lines"
-            $csm_cmd compose -f "$f" logs -f --tail="$lines"
+            "$csm_cmd" compose -f "$f" logs -f --tail="$lines"
             ;;
     esac
 }
@@ -1088,7 +1089,7 @@ stack_cd() {
 _run_net_list() {
     _log STEP "_run_net_list: listing networks"
     printf "%s%-30s %-10s %-10s %s%s\n" "${bld}" "NAME" "DRIVER" "SCOPE" "ID" "${rst}"
-    $csm_cmd network ls --format "{{.Name}}\t{{.Driver}}\t{{.Scope}}\t{{.ID}}" | sort | column -ts $'\t'
+    "$csm_cmd" network ls --format "{{.Name}}\t{{.Driver}}\t{{.Scope}}\t{{.ID}}" | sort | column -ts $'\t'
 }
 
 net_info() {
@@ -1106,7 +1107,7 @@ net_info() {
             ;;
         i|inspect)
             _log STEP "net_info: inspecting network $target"
-            $csm_cmd network inspect "$target"
+            "$csm_cmd" network inspect "$target"
             ;;
         l|ls|list)
             # Explicit list call
@@ -1156,7 +1157,7 @@ manage_config() {
             ;;
         reload)
             _log STEP "manage_config: reloading config..."
-            _load_config
+            _setup_variables
             _log PASS "Configuration reloaded."
             ;;
         *)
@@ -1291,7 +1292,7 @@ main() {
 
     _log STEP "Setting up colors..."
     _log STEP "Loading config files..."
-    _load_config
+    _setup_variables
 
     case "$cmd" in
         -a | --aliases)         _print_aliases; exit 0 ;;
