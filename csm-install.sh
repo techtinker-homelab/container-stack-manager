@@ -247,7 +247,7 @@ EOF
     readonly bin_link="/usr/local/bin/csm"
 
     # Permission modes (move to csm.ini if configurable, else keep here)
-    readonly mode_dirs="775"
+    readonly mode_dirs="770"
     readonly mode_exec="770"
     readonly mode_conf="660"
     readonly mode_auth="600"
