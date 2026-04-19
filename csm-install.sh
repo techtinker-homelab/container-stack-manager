@@ -265,7 +265,8 @@ EOF
 
     # Optional interactive override (only if not forced)
     if [[ $force_install -eq 0 ]]; then
-        if _confirm_yes "Do you want to manually edit any of the configuration values? (press ENTER to keep the current value)"; then
+        if _confirm_no "Do you want to manually edit any of the configuration values?"; then
+            _log INFO "Press ENTER to keep the current value in brackets."
             local var cur new
             for var in "${csm_vars[@]}"; do
                 cur="${!var}"
