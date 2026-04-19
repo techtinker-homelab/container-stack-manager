@@ -104,12 +104,17 @@ _check_cmd() {
     fi
 }
 
+_get_perms() {
+    local file="${1:-}"
+    stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null || echo ""
+}
+
 _check_permissions() {
     local dir="${1:-}"
     if [[ ! -d "$dir" ]]; then return 0; fi # Skip if directory doesn't exist
 
     local owner; owner=$(stat -c '%U' "$dir" 2>/dev/null || stat -f '%Su' "$dir")
-    local perms; perms=$(stat -c '%a' "$dir" 2>/dev/null || stat -f '%Lp' "$dir")
+    local perms; perms=$(_get_perms "$dir")
 
     # Safe if owned by current user or root AND not world-writable (last digit < 2)
     if [[ "$owner" == "$USER" || "$owner" == "root" ]] && [[ "${perms: -1}" < "2" ]]; then
@@ -251,7 +256,7 @@ _setup_variables() {
         fi
     done
 
-    # Assign global variables to local script variable names
+    # Assign global variables with defaults to prevent undefined errors
     csm_dir="${CSM_ROOT_DIR:-/srv/stacks}"
     csm_backups="${CSM_BACKUPS_DIR:-${csm_dir}/.backups}"
     csm_configs="${CSM_CONFIGS_DIR:-${csm_dir}/.configs}"
@@ -260,8 +265,8 @@ _setup_variables() {
     csm_net_name="${CSM_NETWORK_NAME:-csm_network}"
     csm_gid="${CSM_STACKS_GID:-$(id -g)}"
     csm_uid="${CSM_STACKS_UID:-$(id -u)}"
-    csm_group=$(id -gn "$csm_uid" 2>/dev/null || getent group "$csm_gid" | cut -d: -f1)
-    csm_owner=$(id -un "$csm_uid" 2>/dev/null || getent passwd "$csm_uid" | cut -d: -f1)
+    csm_group=$(id -gn "$csm_uid" 2>/dev/null || getent group "$csm_gid" | cut -d: -f1 || echo "${csm_runtime:-docker}")
+    csm_owner=$(id -un "$csm_uid" 2>/dev/null || getent passwd "$csm_uid" | cut -d: -f1 || echo "$(id -un)")
 
     csm_version=${CSM_VERSION:-unknown}
 
@@ -288,8 +293,7 @@ _validate_permissions() {
     local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
     _log STEP "_validate_permissions: checking $stack_dir"
     if [[ ! -d "$stack_dir" ]]; then return 0; fi
-    local mode
-    mode="$(stat -c '%a' "$stack_dir" 2>/dev/null || stat -f '%Lp' "$stack_dir" 2>/dev/null || echo "")"
+    local mode; mode=$(_get_perms "$stack_dir")
     if [[ -z "$mode" ]]; then _log WARN "Unable to get permissions for $stack_dir"; return; fi
     _log STEP "_validate_permissions: got mode=$mode, expected 770"
     if [[ "$mode" != "770" ]]; then
@@ -792,7 +796,7 @@ secret_create() {
         _log STEP "secret_create: using existing file $secret_file"
         if [[ -L "$secret_file" ]]; then _log EXIT "Refusing symlinked secret file: $secret_file"; fi
         if [[ ! -r "$secret_file" ]]; then _log EXIT "Secret file exists but is not readable: $secret_file"; fi
-        local perms="$(stat -c '%a' "$secret_file" 2>/dev/null || stat -f '%Lp' "$secret_file" 2>/dev/null || true)"
+        local perms; perms=$(_get_perms "$secret_file")
         if [[ ! "$perms" == "600" ]]; then _log WARN "Secret file permissions are $perms, expected 600."; fi
         _log STEP "secret_create: running docker secret create $name $secret_file"
         docker secret create "$name" "$secret_file" \
