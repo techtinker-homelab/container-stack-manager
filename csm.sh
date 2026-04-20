@@ -1449,13 +1449,13 @@ main() {
     local cmd="${1:-}"
     _color_setup
     _log STEP "main() called with cmd='$cmd'"
+    _setup_variables
     _check_prereqs
     if [[ -z "$cmd" ]]; then show_help; exit 0; fi
     shift || true
 
     _log STEP "Setting up colors..."
     _log STEP "Loading config files..."
-    _setup_variables
 
     case "$cmd" in
         -a | --aliases)         _print_aliases; exit 0 ;;
@@ -1465,8 +1465,6 @@ main() {
 
     _log STEP "Validating config..."
     _validate_config || true
-    _log STEP "Detecting container runtime..."
-    _detect_command
     _log STEP "Using runtime: $csm_cmd"
 
     _log STEP "Dispatching command: '$cmd'"
