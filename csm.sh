@@ -174,7 +174,7 @@ _get_group() {
     fi
 
     # Final fallback
-    echo "${group_name:-${csm_runtime:-docker}}"
+    echo "${group_name:-${csm_cmd:-docker}}"
 }
 
 _get_uid() {
@@ -222,15 +222,15 @@ _check_prereqs() {
     _log STEP "_check_prereqs: checking container runtime, permissions, and group..."
 
     # Detect container runtime first (needed before _check_cmd)
-    if [[ -z "${csm_runtime:-}" ]]; then
+    if [[ -z "${csm_cmd:-}" ]]; then
         _detect_command
     fi
 
     _check_cmd
-    if [[ -z "$csm_runtime" ]]; then
+    if [[ -z "$csm_cmd" ]]; then
         _log EXIT "No container runtime found. Please install Docker or Podman first."
     fi
-    _log STEP "Container runtime detected: $csm_runtime"
+    _log STEP "Container runtime detected: $csm_cmd"
 
     # Check stacks directory permissions
     if ! _check_permissions "$csm_dir"; then
@@ -400,7 +400,7 @@ _setup_variables() {
     csm_modules="${CSM_MODULES_DIR:-${csm_dir}/.modules}"
 
     # Assign operation varaibles with defaults
-    csm_gid="${CSM_STACKS_GID:-$(_get_gid "${csm_runtime:-docker}")}"
+    csm_gid="${CSM_STACKS_GID:-$(_get_gid "${csm_cmd:-docker}")}"
     csm_uid="${CSM_STACKS_UID:-$(_get_uid)}"
     csm_group=$(_get_group "$csm_gid")
     csm_owner=$(_get_owner "$csm_uid")
