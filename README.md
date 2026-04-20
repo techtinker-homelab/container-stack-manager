@@ -37,7 +37,7 @@ Docker or Podman will be detected automatically, or you can choose which to inst
 1. **Clone the repository:**
    ```bash
    mkdir -p ~/git
-   git clone https://github.com/techtinker/container-stack-manager.git ~/git/container-stack-manager
+   git clone https://gitlab.com/techtinker/container-stack-manager.git ~/git/container-stack-manager
    cd ~/git/container-stack-manager
    ```
 
