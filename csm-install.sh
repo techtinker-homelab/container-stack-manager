@@ -215,13 +215,6 @@ EOF
     # Load defaults from csm.ini
     source "$csm_ini_file"
 
-    # Load user overrides from user.conf (if exists) – this should only contain user-set values
-    local user_conf="${csm_configs:-${CSM_CONFIGS_DIR}}/user.conf"
-    if [[ -f "$user_conf" ]]; then
-        source "$user_conf"
-        _log PASS "Loaded user overrides from $user_conf"
-    fi
-
     # Map CSM_* names to internal vars with defaults
     csm_version="${CSM_VERSION:-undefined}"
     csm_runtime="${CSM_CONTAINER_RUNTIME:-}"
@@ -259,27 +252,31 @@ EOF
         ["${script_dir}/csm.sh"]="${csm_configs}/"
         ["${script_dir}/csm.ini"]="${csm_configs}/"
     )
+}
 
-    # Optional interactive override (only if not forced)
-    if [[ $force_install -eq 0 ]]; then
-        if _confirm_no "Do you want to manually edit any of the configuration values?"; then
-            _log INFO "Press ENTER to keep the current value in brackets."
-            local var cur new
-            for var in "${csm_vars[@]}"; do
-                cur="${!var}"
-                read -r -p "${ylw}${bld}Current value for ${var} [$cur]: ${rst}" new
-                if [[ -n "$new" ]]; then
-                    export "${var}=${new}"
-                    # Persist to user.conf
-                    if [[ -f "$user_conf" ]]; then
-                        sed -i "s|^${var}=.*|${var}=${new}|" "$user_conf"
-                    else
-                        echo "${var}=${new}" >>"$user_conf"
-                    fi
-                    _log STEP "Updated ${var}: ${cur} → ${new}"
+_interactive_config_prompt() {
+    if [[ "$force_install" == 1 ]]; then return 0; fi
+
+    # user.conf will be created in _setup_files if it doesn't exist
+    local user_conf="${csm_configs}/user.conf"
+
+    if _confirm_no "Do you want to manually edit any of the configuration values?"; then
+        _log INFO "Press ENTER to keep the current value in brackets."
+        local var cur new
+        for var in "${csm_vars[@]}"; do
+            cur="${!var}"
+            read -r -p "${ylw}${bld}Current value for ${var} [$cur]: ${rst}" new
+            if [[ -n "$new" ]]; then
+                export "${var}=${new}"
+                # Persist to user.conf
+                if grep -q "^${var}=" "$user_conf" 2>/dev/null; then
+                    sed -i "s|^${var}=.*|${var}=${new}|" "$user_conf"
+                else
+                    echo "${var}=${new}" >>"$user_conf"
                 fi
-            done
-        fi
+                _log STEP "Updated ${var}: ${cur} → ${new}"
+            fi
+        done
     fi
 }
 
@@ -806,7 +803,6 @@ main() {
             # -d | --dryrun)      dry_run=1; csm_debug=1; shift ;; # TODO: implement dry run feature
             -f | --force)       force_install=1; shift ;;
             -h | --help )       show_help; exit 0 ;;
-            # -i | --install)     : ;;
             -u | --uninstall)   uninstall_mode=1; shift ;;
             -V | --version)     _log PASS "Container Stack Manager Installer, csm-install.sh version: ${CSM_VERSION}"; exit 0 ;;
             *) _log WARN "Unknown argument: $1 \n Use './csm-install.sh help' to view supported options." >&2; exit 1 ;;
@@ -817,10 +813,15 @@ main() {
     if [[ "$uninstall_mode" == 1 ]]; then
         _uninstall_csm
     fi
+
+    # Handle installation
     _log INFO "Container Stack Manager v${CSM_VERSION} – installer starting"
     if [[ "$force_install" == 1 ]]; then
         _log WARN "FORCE MODE ACTIVE: Existing configs will be overwritten and prompts bypassed."
     fi
+
+    # Interactive config prompt (skip if force_install is set)
+    _interactive_config_prompt
 
     _log INFO "Install root: ${csm_dir}"
     _log INFO "Invoking user: ${csm_owner} (UID ${csm_uid})"
