@@ -9,8 +9,8 @@
 #   ./<repo>/
 #   ├── csm.sh              ← Main runtime script (symlinked to /usr/local/bin/csm during install)
 #   ├── csm-install.sh      ← One-shot installer (run once; sets up the environment)
-#   ├── example.conf        ← Default configuration values (copied as default.conf during install)
-#   ├── example.conf        ← Example global environment template
+#   ├── csm.ini             ← Default configuration values
+#   ├── example.env         ← Example environment template
 #   └── README.md           ← Project description and instructions for installation and use.
 #
 # Installed layout:
@@ -20,7 +20,8 @@
 #   │     └── <stack>-YYYYMMDD_HHMMSS.tar.gz  ← backup file for each stack
 #   ├── .configs/
 #   │  ├── csm.sh                   ← main CSM script containing all helper scripts
-#   │  ├── default.conf             ← default configuration variables
+#   │  ├── csm.ini                  ← default configuration variables (from repo template)
+#   │  ├── user.conf                ← user overrides (optional)
 #   │  ├── local-compose.yml        ← example compose.yml for "local" Docker & Podman
 #   │  ├── swarm-compose.yml        ← example compose.yml for Docker Swarm only
 #   │  └── user.conf                ← user overrides (optional)
@@ -346,41 +347,49 @@ _detect_scope() {
 
 _setup_variables() {
     _log STEP "_setup_variables: loading config files..."
-    csm_configs="${script_dir}/.configs"
+
+    # First, determine base config search path (fallback to repo location before install)
+    local script_csm_configs="${script_dir}/.configs"
+    local home_csm_configs="${HOME}/.config/csm"
+
+    # Source default variable values from csm.ini (may live in repo or installed location)
+    local csm_ini_file=""
+    if [[ -f "${script_dir}/csm.ini" ]]; then
+        csm_ini_file="${script_dir}/csm.ini"
+    elif [[ -f "${script_csm_configs}/csm.ini" ]]; then
+        csm_ini_file="${script_csm_configs}/csm.ini"
+    fi
+
+    if [[ -n "$csm_ini_file" ]] && [[ -f "$csm_ini_file" ]]; then
+        source "$csm_ini_file"
+        _log STEP "_setup_variables: sourced $csm_ini_file"
+    fi
+
+    # Determine effective configs directory (user may have overridden in csm.ini or env)
+    csm_configs="${CSM_CONFIGS_DIR:-${script_csm_configs}}"
+
+    # Now load user.conf from the effective configs directory (and fallback paths)
     local config_paths=(
         "${csm_configs}"
-        "${HOME}/.config/csm"
+        "${home_csm_configs}"
     )
 
-    # Source default variable values
-    if [[ -f "${script_dir}/csm.ini" ]]; then source "${script_dir}/csm.ini"; fi
-
     for dir in "${config_paths[@]}"; do
-        if _check_permissions "$dir"; then
-            for f in "$dir"/*.conf "$dir"/user.conf; do
-                if [[ -f "$f" ]]; then source "$f"; fi
-            done
-        else
+        if [[ -d "$dir" ]] && _check_permissions "$dir"; then
+            local user_conf="${dir}/user.conf"
+            if [[ -f "$user_conf" ]]; then
+                source "$user_conf"
+                _log STEP "_setup_variables: sourced $user_conf"
+            fi
+        elif [[ -d "$dir" ]]; then
             _log WARN "Skipping unsafe config directory: $dir"
         fi
     done
 
-    # Update variables to user-set values if they exist
-    for f in \
-        "${csm_configs}"/*.conf \
-        "${csm_configs}"/user.conf \
-        "${HOME}"/.config/csm/*.conf \
-        "${HOME}"/.config/csm/user.conf
-    do
-        if [[ -f "$f" ]]; then
-            _log STEP "_setup_variables: sourcing $f"
-            source "$f"
-        else
-            _log STEP "_setup_variables: not found $f"
-        fi
-    done
+    # Re-evaluate configs dir after user.conf may have set CSM_CONFIGS_DIR
+    csm_configs="${CSM_CONFIGS_DIR:-${csm_dir:-/srv/stacks}/.configs}"
 
-    # Assign directory variables with defaults
+    # Assign directory variables with defaults (now that all config sources have been loaded)
     csm_dir="${CSM_ROOT_DIR:-/srv/stacks}"
     csm_backups="${CSM_BACKUPS_DIR:-${csm_dir}/.backups}"
     csm_configs="${CSM_CONFIGS_DIR:-${csm_dir}/.configs}"
