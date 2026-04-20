@@ -104,23 +104,147 @@ _check_cmd() {
     fi
 }
 
-_get_perms() {
+_get_file_info() {
     local file="${1:-}"
-    stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null || echo ""
+    local info=""
+    # Try GNU stat first (Linux)
+    if command -v stat >/dev/null 2>&1 && stat -c '%U %G %a' "$file" 2>/dev/null; then
+        info=$(stat -c '%U %G %a' "$file")
+    # Fallback to BSD/macOS stat
+    elif command -v stat >/dev/null 2>&1 && stat -f '%Su %Sg %Lp' "$file" 2>/dev/null; then
+        info=$(stat -f '%Su %Sg %Lp' "$file")
+    fi
+    echo "$info"
 }
 
 _check_permissions() {
     local dir="${1:-}"
     if [[ ! -d "$dir" ]]; then return 0; fi # Skip if directory doesn't exist
 
-    local owner; owner=$(stat -c '%U' "$dir" 2>/dev/null || stat -f '%Su' "$dir")
-    local perms; perms=$(_get_perms "$dir")
+    local info; info=$(_get_file_info "$dir")
+    if [[ -z "$info" ]]; then
+        _log WARN "Unable to retrieve file info for $dir"
+        return 1
+    fi
+
+    local owner group perms; read -r owner group perms <<< "$info"
 
     # Safe if owned by current user or root AND not world-writable (last digit < 2)
     if [[ "$owner" == "$USER" || "$owner" == "root" ]] && [[ "${perms: -1}" < "2" ]]; then
         return 0
     fi
     return 1
+}
+
+_get_gid() {
+    local group="${1:-}"
+    local gid=""
+
+    # macOS/BSD with dscl
+    if command -v dscl >/dev/null 2>&1; then
+        gid=$(dscl . -read /Groups/"$group" PrimaryGroupID 2>/dev/null | awk '{print $2}')
+    # Linux with getent
+    elif command -v getent >/dev/null 2>&1; then
+        gid=$(getent group "$group" | cut -d: -f3)
+    fi
+
+    # Fallback: try to get from current user's groups
+    if [[ -z "$gid" ]]; then
+        gid=$(id -G "$USER" 2>/dev/null | tr ' ' '\n' | grep -w "$(id -gn "$USER" 2>/dev/null || echo "$group")" | head -1)
+    fi
+
+    echo "$gid"
+}
+
+_get_group() {
+    local gid="${1:-}"
+    local group_name=""
+
+    # macOS/BSD with dscl
+    if command -v dscl >/dev/null 2>&1; then
+        group_name=$(dscl . -search /Groups PrimaryGroupID "$gid" 2>/dev/null | head -1 | cut -d: -f1)
+    # Linux with getent
+    elif command -v getent >/dev/null 2>&1; then
+        group_name=$(getent group "$gid" | cut -d: -f1)
+    fi
+
+    # Fallback: use id command
+    if [[ -z "$group_name" ]]; then
+        group_name=$(id -gn "$gid" 2>/dev/null)
+    fi
+
+    # Final fallback
+    echo "${group_name:-${csm_runtime:-docker}}"
+}
+
+_get_uid() {
+    local user="${1:-$USER}"
+    local uid=""
+
+    # macOS/BSD with dscl
+    if command -v dscl >/dev/null 2>&1; then
+        uid=$(dscl . -read /Users/"$user" UniqueID 2>/dev/null | awk '{print $2}')
+    # Linux with getent
+    elif command -v getent >/dev/null 2>&1; then
+        uid=$(getent passwd "$user" | cut -d: -f3)
+    fi
+
+    # Fallback: use id command (POSIX, works everywhere)
+    if [[ -z "$uid" ]]; then
+        uid=$(id -u "$user" 2>/dev/null)
+    fi
+
+    echo "$uid"
+}
+
+_get_owner() {
+    local uid="${1:-}"
+    local user_name=""
+
+    # macOS/BSD with dscl
+    if command -v dscl >/dev/null 2>&1; then
+        user_name=$(dscl . -search /Users UniqueID "$uid" 2>/dev/null | head -1 | cut -d: -f1)
+    # Linux with getent
+    elif command -v getent >/dev/null 2>&1; then
+        user_name=$(getent passwd "$uid" | cut -d: -f1)
+    fi
+
+    # Fallback: use id command
+    if [[ -z "$user_name" ]]; then
+        user_name=$(id -un "$uid" 2>/dev/null)
+    fi
+
+    # Final fallback
+    echo "${user_name:-$USER}"
+}
+
+_check_prereqs() {
+    _log STEP "_check_prereqs: checking container runtime, permissions, and group..."
+    _check_cmd
+    if [[ -z "$csm_runtime" ]]; then
+        _log EXIT "No container runtime found. Please install Docker or Podman first."
+    fi
+    _log STEP "Container runtime detected: $csm_runtime"
+
+    # Check stacks directory permissions
+    if ! _check_permissions "$csm_dir"; then
+        _log EXIT "Stacks directory '$csm_dir' has unsafe permissions. Fix with: chown $USER:$USER '$csm_dir' && chmod 755 '$csm_dir'"
+    fi
+    _log STEP "Stacks directory permissions are safe"
+
+    # Check container group and set csm_gid
+    csm_gid=$(_get_gid "$csm_group")
+    if [[ -z "$csm_gid" ]]; then
+        _log EXIT "Container group '$csm_group' not found or GID cannot be determined. Please run the installer to create the group."
+    fi
+    _log STEP "Container group '$csm_group' found with GID: $csm_gid"
+
+    # Set csm_uid with fallback
+    csm_uid="${SUDO_UID:-$(id -u "$USER" 2>/dev/null || id -u)}"
+    if [[ -z "$csm_uid" ]]; then
+        _log EXIT "Unable to determine user UID. Check user setup."
+    fi
+    _log STEP "_check_prereqs: csm_uid=$csm_uid"
 }
 
 _confirm_yes() {
@@ -256,21 +380,34 @@ _setup_variables() {
         fi
     done
 
-    # Assign global variables with defaults to prevent undefined errors
+    # Assign directory variables with defaults
     csm_dir="${CSM_ROOT_DIR:-/srv/stacks}"
     csm_backups="${CSM_BACKUPS_DIR:-${csm_dir}/.backups}"
     csm_configs="${CSM_CONFIGS_DIR:-${csm_dir}/.configs}"
     csm_secrets="${CSM_SECRETS_DIR:-${csm_dir}/.secrets}"
     csm_modules="${CSM_MODULES_DIR:-${csm_dir}/.modules}"
+
+    # Assign operation varaibles with defaults
+    csm_gid="${CSM_STACKS_GID:-$(_get_gid "${csm_runtime:-docker}")}"
+    csm_uid="${CSM_STACKS_UID:-$(_get_uid)}"
+    csm_group=$(_get_group "$csm_gid")
+    csm_owner=$(_get_owner "$csm_uid")
     csm_net_name="${CSM_NETWORK_NAME:-csm_network}"
-    csm_gid="${CSM_STACKS_GID:-$(id -g)}"
-    csm_uid="${CSM_STACKS_UID:-$(id -u)}"
-    csm_group=$(id -gn "$csm_uid" 2>/dev/null || getent group "$csm_gid" | cut -d: -f1 || echo "${csm_runtime:-docker}")
-    csm_owner=$(id -un "$csm_uid" 2>/dev/null || getent passwd "$csm_uid" | cut -d: -f1 || echo "$(id -un)")
 
     csm_version=${CSM_VERSION:-unknown}
 
-    _log STEP "_setup_variables: csm_dir=$csm_dir, csm_cmd will be detected next"
+    local reverse_proxy_list=(
+        traefik
+        caddy
+        caddy-manager
+        caddymanager
+        nxpm
+        nginx-proxy-manager
+        npm
+        haproxy
+    )
+
+    _log STEP "_setup_variables: step complete, csm_dir=$csm_dir"
 }
 
 _validate_config() {
@@ -380,40 +517,48 @@ stack_create() {
         target_scope="swarm"
     fi
 
-    local tmpl_compose="$csm_configs/${target_scope}-compose.yml"
-    local tmpl_env="$csm_configs/.${target_scope}.env"
+    local temp_compose="$csm_configs/${target_scope}-compose.yml"
+    local temp_env="$csm_configs/.${target_scope}.env"
 
     _log STEP "stack_create: name=$stack_name, dir=$stack_dir, scope=$target_scope"
     if [[ -d "$stack_dir" ]]; then _log EXIT "Stack '$stack_name' already exists at $stack_dir"; fi
 
     _log STEP "stack_create: creating directories..."
-    install -o "$csm_uid" -g "$csm_gid" -m "$mode_dirs" -d "$stack_dir"/appdata
     install -o "$csm_uid" -g "$csm_gid" -m "$mode_dirs" -d "$stack_dir"
+    for app_name in "${reverse_proxy_list[@]}"; do
+        if [[ "${stack_name}" == "${app_name}" ]]; then
+            install -o "$csm_uid" -g "$csm_gid" -m "$mode_auth" -d "$stack_dir"/certs
+        fi
+    done
 
     # Handle Compose File
-    if [[ -f "$tmpl_compose" ]]; then
-        _log STEP "stack_create: copying template $tmpl_compose"
-        install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$tmpl_compose" "$stack_dir/compose.yml"
+    if [[ -f "$temp_compose" ]]; then
+        _log STEP "stack_create: copying template $temp_compose"
+        install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$temp_compose" "$stack_dir/compose.yml"
 
         # Inject the dynamic network name into the static template
         sed -i "s/CSM_NETWORK_PLACEHOLDER/${csm_net_name}/g" "$stack_dir/compose.yml"
     else
-        _log WARN "Template not found: $tmpl_compose. Falling back to internal boilerplate."
+        _log WARN "Template not found: $temp_compose. Falling back to internal boilerplate."
         cat > "${stack_dir}/compose.yml" <<EOF
 networks:
-  default:
-    external:
-      name: ${csm_net_name}
+  ${csm_net_name}:
+    external: true
 
 services:
   # Add your service definitions here
+  app:
+    image: repo/imagename:latest
+    restart: unless_stopped
+    networks:
+        - ${csm_net_name}
 EOF
     fi
 
     # Handle Env File
-    if [[ -f "$tmpl_env" ]]; then
-        _log STEP "stack_create: copying env template $tmpl_env"
-        install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$tmpl_env" "$stack_dir/.env"
+    if [[ -f "$temp_env" ]]; then
+        _log STEP "stack_create: copying env template $temp_env"
+        install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$temp_env" "$stack_dir/.env"
     else
         _log STEP "stack_create: no template found, creating empty .env"
         : > "${stack_dir}/.env"
@@ -796,7 +941,8 @@ secret_create() {
         _log STEP "secret_create: using existing file $secret_file"
         if [[ -L "$secret_file" ]]; then _log EXIT "Refusing symlinked secret file: $secret_file"; fi
         if [[ ! -r "$secret_file" ]]; then _log EXIT "Secret file exists but is not readable: $secret_file"; fi
-        local perms; perms=$(_get_perms "$secret_file")
+        local info; info=$(_get_file_info "$secret_file")
+        local owner group perms; read -r owner group perms <<< "$info"
         if [[ ! "$perms" == "600" ]]; then _log WARN "Secret file permissions are $perms, expected 600."; fi
         _log STEP "secret_create: running docker secret create $name $secret_file"
         docker secret create "$name" "$secret_file" \
@@ -1291,6 +1437,7 @@ main() {
     local cmd="${1:-}"
     _color_setup
     _log STEP "main() called with cmd='$cmd'"
+    _check_prereqs
     if [[ -z "$cmd" ]]; then show_help; exit 0; fi
     shift || true
 
