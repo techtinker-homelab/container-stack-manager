@@ -21,7 +21,6 @@
 #   ├── .configs/
 #   │  ├── csm.sh                   ← main CSM script containing all helper scripts
 #   │  ├── csm.ini                  ← default configuration variables (from repo template)
-#   │  ├── user.conf                ← user overrides (optional)
 #   │  ├── local-compose.yml        ← example compose.yml for "local" Docker & Podman
 #   │  ├── swarm-compose.yml        ← example compose.yml for Docker Swarm only
 #   │  └── user.conf                ← user overrides (optional)
@@ -47,12 +46,12 @@ set -euo pipefail
 # =============================================================================
 readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
-csm_debug="1" # set to "1" to display debug step messages
+csm_debug="0" # set to "1" to display debug step messages
 csm_cmd=""    # set by _detect_command
 scope=""      # set by _detect_scope
 
 # Permission modes (symbolic form — compatible with GNU and BSD install)
-readonly mode_dirs="775"   # directories:  rwxrwxr-x
+readonly mode_dirs="770"   # directories:  rwxrwx---
 readonly mode_exec="770"   # executables:  rwxrwx---
 readonly mode_conf="660"   # config files: rw-rw----
 readonly mode_auth="600"   # secrets:      rw-------
@@ -221,6 +220,12 @@ _get_owner() {
 
 _check_prereqs() {
     _log STEP "_check_prereqs: checking container runtime, permissions, and group..."
+
+    # Detect container runtime first (needed before _check_cmd)
+    if [[ -z "${csm_runtime:-}" ]]; then
+        _detect_command
+    fi
+
     _check_cmd
     if [[ -z "$csm_runtime" ]]; then
         _log EXIT "No container runtime found. Please install Docker or Podman first."
@@ -249,7 +254,6 @@ _check_prereqs() {
 }
 
 _confirm_yes() {
-    if [[ "$force_install" == 1 ]]; then return 0; fi
     local prompt="${1:-Are you sure?}"
     read -r -p "${ylw}${bld} ${prompt} [Y/n]: ${rst}" reply
     if [[ -z "${reply}" || "${reply,,}" == "y" ]]; then return 0; fi
@@ -257,7 +261,6 @@ _confirm_yes() {
 }
 
 _confirm_no() {
-    if [[ "$force_install" == 1 ]]; then return 0; fi
     local prompt="${1:-Are you sure?}"
     read -r -p "${ylw}${bld}  ${prompt} [y/N]: ${rst}" reply
     if [[ "${reply,,}" == "y" ]]; then return 0; fi
