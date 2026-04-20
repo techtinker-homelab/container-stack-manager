@@ -222,17 +222,19 @@ EOF
         _log PASS "Loaded user overrides from $user_conf"
     fi
 
-    # Map CSM_* names to internal vars (with defaults to prevent undefined errors under set -euo pipefail)
+    # Map CSM_* names to internal vars with defaults
+    csm_version="${CSM_VERSION:-undefined}"
     csm_runtime="${CSM_CONTAINER_RUNTIME:-}"
-    csm_gid="${CSM_STACKS_GID:-2000}"
+    csm_net_name="${CSM_NETWORK_NAME:-csm_network}"
+    csm_gid="${csm_gid:-${CSM_STACKS_GID:-2000}}"
     csm_uid="${CSM_STACKS_UID:-$(id -u)}"
+
+    # Map CSM_ dir vars to internal vars with defaults
     csm_dir="${CSM_ROOT_DIR:-/srv/stacks}"
     csm_backups="${CSM_BACKUPS_DIR:-${csm_dir}/.backups}"
     csm_configs="${CSM_CONFIGS_DIR:-${csm_dir}/.configs}"
     csm_modules="${CSM_MODULES_DIR:-${csm_dir}/.modules}"
     csm_secrets="${CSM_SECRETS_DIR:-${csm_dir}/.secrets}"
-    csm_version="${CSM_VERSION:-undefined}"
-    csm_net_name="${CSM_NETWORK_NAME:-csm_network}"
 
     # Export internal names for use by other functions
     export csm_runtime csm_gid csm_uid csm_dir csm_backups \
@@ -803,8 +805,8 @@ EOF
 # =============================================================================
 
 main() {
-    _vars_setup
     _color_setup
+    _vars_setup
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "${1:-}" in
