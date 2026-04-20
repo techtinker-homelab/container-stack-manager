@@ -930,6 +930,18 @@ _safe_secret() {
     chmod 600 "$secret_file"
 }
 
+secret() {
+    local action="${1:-}"
+    shift || true
+
+    case "$action" in
+        ls|list)     secret_list   "$@" ;;
+        rm|remove)   secret_remove "$@" ;;
+        ""|create)   secret_create "$@" ;;
+        *)           _log EXIT "Unknown secret action: '$action' (use: ls, rm, or omit to create)" ;;
+    esac
+}
+
 secret_create() {
     local name="${1:-}"
     if [[ -z "${name// }" ]]; then _log EXIT "Secret name cannot be empty."; fi
@@ -1428,8 +1440,7 @@ ${bld}Configuration:${rst}
     cfg | config (show|edit|reload)  Display, edit, or reload CSM configs
 
 ${bld}Secrets:${rst}
-    secret     <name>           Create a Docker secret (swarm required)
-    secret (-ls|-rm) <name>           List all or Remove a single Docker secret
+    secret [ls|rm] <name>       Create, list, or remove Docker secrets (swarm required)
 
 ${bld}Options:${rst}
     -h | --help            Show this help
@@ -1493,9 +1504,7 @@ main() {
         net)            net_info        "$@" ;;
         cfg|config)     manage_config   "$@" ;;
         m|module)       manage_module   "$@" ;;
-        secret)         secret_create   "$@" ;;
-        secret-rm)      secret_remove   "$@" ;;
-        secret-ls)      secret_list          ;;
+        secret)         secret          "$@" ;;
         *) _log FAIL "Unknown command: '$cmd'"; show_help; exit 1 ;;
     esac
 }

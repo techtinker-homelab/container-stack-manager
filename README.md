@@ -221,9 +221,9 @@ csm <command> [<stack-name>] [options]
 
 | Command | Aliases | Description |
 |---|---|---|
-| `secret <name>` | | Create a Docker secret from file, stdin, or prompt (swarm required) |
-| `secret-rm <name>` | | Remove a Docker secret and its backup file |
-| `secret-ls` | | List all Docker secrets |
+| `secret <name>` | | Create a Docker secret (swarm required) |
+| `secret ls` | | List all Docker secrets |
+| `secret rm <name>` | | Remove a Docker secret and its backup file |
 
 Secrets are stored in `CSM_ROOT_DIR/.secrets/` as `<name>.secret` files with `600` permissions. When creating a secret, CSM will:
 1. Use an existing `.secret` file if present
