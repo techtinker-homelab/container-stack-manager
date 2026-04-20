@@ -1394,43 +1394,42 @@ ${bld}Container Stack Manager (CSM) v${csm_version}${rst}
 ${bld}Usage:${rst} csm <command> [<stack-name>] [options]
 
 ${bld}Stack Lifecycle:${rst}
-    c  | create   <n>           Create a new stack directory + compose scaffold
-    n  | new      <n>           Create a new stack directory + compose scaffold
-    e  | edit     <n>           Open compose.yml in \$EDITOR
-    r  | rename   <old> <new>   Rename a stack directory
-    rm | remove   <n>           Stop and remove containers in a stack (prompts)
-    dt | delete   <n>           Stop and PERMANENTLY delete stack + all data (prompts)
-    bu | backup   <n>           Tar-gz the stack directory to .backup/
-    rc | recreate <n>           Delete and recreate a stack from scratch (prompts)
-    xx | purge    [n...]        Purge stacks — WARNING THIS IS FINAL
+    c  | create   <stack>        Create a new stack directory + compose scaffold
+    n  | new      <stack>        Alias for create
+    e  | edit     <stack>        Open compose.yml in \$EDITOR
+    r  | rename   <old> <new>    Rename a stack directory
+    rm | remove   <stack>        Stop and remove containers (prompts)
+    dt | delete   <stack>        Permanently delete stack + all data (prompts)
+    bu | backup   <stack>        Archive stack to .backups/ as tar.gz
+    rc | recreate <stack>        Delete and recreate stack from scratch (prompts)
+    xx | purge    [stack...]     Purge one or all stacks — WARNING THIS IS FINAL
 
-${bld}Swarm Stack Operations:${rst}
-    u  | up       <n>           Deploy a stack (up -d --remove-orphans)
-    d  | down     <n>           Stop and remove containers (down)
-    b  | bounce   <n>           Bring stack down then back up (full recreate)
-    st | start    <n>           Start stopped containers
-    sp | stop     <n>           Stop containers without removing
-    rs | restart  <n>           Restart containers
-    ud | update   <n>           Pull latest images then redeploy
+${bld}Stack Operations:${rst}
+    u  | up       <stack>        Deploy stack (up -d --remove-orphans)
+    d  | down     <stack>        Stop and remove containers (down)
+    b  | bounce   <stack>        Bring stack down then back up
+    st | start    <stack>        Start stopped containers
+    sp | stop     <stack>        Stop containers without removing
+    rs | restart  <stack>        Restart containers
+    ud | update   <stack>        Pull latest images then redeploy
 
 ${bld}Information:${rst}
-    l  | list                   List all stacks with running state
-    s  | status   <n>           Show container/service status for a stack
-    v  | validate <n>           Validate compose.yml syntax
-    i  | inspect  <n>           Inspect stack configuration
-    g  | logs     <n> [lines]   Follow logs (default: last 50 lines)
-    cd            <n>           Print the stack directory path
-    ps                          List all containers (formatted)
-    net           <action>      Network info: h|host | i|inspect [name] | l|list
-    t  | module               Template management (not yet implemented)
+    l  | list                   List all stacks with running state and scope
+    s  | status   <stack>       Show container/service status for a stack
+    v  | validate <stack>       Validate compose.yml syntax
+    i  | inspect  <stack>       Inspect stack configuration
+    g  | logs     <stack> [n]   Follow logs (default: last 50 lines)
+    cd            <stack>       Print the stack directory path
+    ps                          List all containers (formatted, colorized)
+    net           [action]      Network info: host | inspect [name] | list
+    m  | module                 Module management (not yet implemented)
 
-${bld}Config:${rst}
-    cfg | config (show | edit | reload)  Displays, Edits, or Reloads CSM configs.
+${bld}Configuration:${rst}
+    cfg | config (show|edit|reload)  Display, edit, or reload CSM configs
 
 ${bld}Secrets:${rst}
-    secret     <name> <value>   Create a Docker secret (swarm required)
-    secret-rm  <name>           Remove a Docker secret
-    secret-ls                  List all Docker secrets
+    secret     <name>           Create a Docker secret (swarm required)
+    secret (-ls|-rm) <name>           List all or Remove a single Docker secret
 
 ${bld}Options:${rst}
     -h | --help            Show this help

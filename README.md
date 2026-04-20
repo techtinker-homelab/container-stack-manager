@@ -10,7 +10,7 @@ A unified CLI tool for managing Docker and Podman Compose stacks on a single hos
 - **Auto Scope Detection**: Automatically detects whether a stack should run as Docker Swarm or local compose. Falls back to marker files (`.swarm` / `.local`) when needed.
 - **Standardized Structure**: Forces all container stacks into a single root directory (`/srv/stacks` by default) with isolated `.env` and `appdata/` directories.
 - **Automated Setup**: The installer detects your container runtime, creates directories, sets permissions, and symlinks everything.
-- **Built-in Backups**: Easily snapshot a stack and its configuration to a centralized `.backup` directory.
+- **Built-in Backups**: Easily snapshot a stack and its configuration to a centralized `.backups` directory.
 - **Shell Aliases**: Source helper functions (`cds`, `hostip`, `vpncheck`, `lancheck`) in your shell rc for quick access.
 
 ---
@@ -35,13 +35,10 @@ Docker or Podman will be detected automatically, or you can choose which to inst
 ### Step-by-step
 
 1. **Clone the repository:**
-  - Create the repository directory:
    ```bash
-   mkdir -p ~/git/container-stack-manager
-   ```
-   ```bash
-   git clone https://gitlab.com/techtinker/container-stack-manager.git ~/git/container-stack-manager
-   cd ~/container-stack-manager
+   mkdir -p ~/git
+   git clone https://github.com/techtinker/container-stack-manager.git ~/git/container-stack-manager
+   cd ~/git/container-stack-manager
    ```
 
 2. **Ensure the installer is executable:**
@@ -49,79 +46,85 @@ Docker or Podman will be detected automatically, or you can choose which to inst
    chmod +x csm-install.sh
    ```
 
-3. **Run the installer:**
-  *NOTE*: You can change the default stacks directory from `/srv/stacks` ***if desired***:
-  ```bash
-  export CSM_ROOT_DIR=/srv/containers
-  ```
-  - Or any desired path, like `/opt/stacks`
-  - Then, run the installer like normal:
+3. **(Optional) Customize the installation:**
+   You can change defaults before running the installer:
+   ```bash
+   export CSM_ROOT_DIR=/srv/containers    # default: /srv/stacks
+   export CSM_STACKS_UID=1000             # default: 1000
+   export CSM_STACKS_GID=2000             # default: 2000
+   ```
 
+4. **Run the installer:**
    ```bash
    sudo ./csm-install.sh
    ```
 
-4. **The installer will:**
+   The installer will prompt you for configuration values. Use `-f` flag to skip prompts (force mode):
+   ```bash
+   sudo ./csm-install.sh -f
+   ```
+
+5. **The installer will:**
    1. Detect or offer to install Podman, Docker Local, or Docker Swarm
    2. Check / start the container service
    3. Create a runtime group (`docker` or `podman`) at GID 2000 (if absent) and add your user to it
    4. Build the directory structure under `CSM_ROOT_DIR`
-   5. Copy core files and set permissions
-   6. Patch `default.conf` with the detected runtime and GID
-   7. Create the `~/stacks` convenience symlink
-   8. Symlink `csm` into `/usr/local/bin`
+   5. Copy core files (`csm.sh`, `csm.ini`) and set permissions
+   6. Create the `~/stacks` convenience symlink
+   7. Symlink `csm` into `/usr/local/bin`
 
 ### Post-Installation
 
 - **NOTE:** If you were added to the runtime group, **log out and log back in** to your terminal session (or reboot) so group ownership is applied before using the `csm` command.
-- Access your stacks at `~/stacks`.
-- Customize your setup by editing the user config: `micro ~/stacks/.configs/user.conf` (or use `nano` or `vi` etc).
+- Access your stacks at `~/stacks` (symlinked to `CSM_ROOT_DIR`).
+- Customize your setup by editing `user.conf`:
+  ```bash
+  csm config edit
+  ```
 
 ---
 
 ## File Layout
 
 ### Repository (Pre-install)
-```text
-# Repository files:
-#   ./<repo>/
-#   ├── csm.sh              ← Main runtime script (symlinked to /usr/local/bin/csm during install)
-#   ├── csm-install.sh      ← One-shot installer (run once; sets up the environment)
-#   ├── example.conf        ← Default configuration values (copied as default.conf during install)
-#   ├── example.conf        ← Example global environment template
-#   └── README.md           ← Project description and instructions for installation and use.
+```
+./<repo>/
+├── csm.sh              ← Main runtime script (symlinked to /usr/local/bin/csm during install)
+├── csm-install.sh      ← One-shot installer (run once; sets up the environment)
+├── csm.ini             ← Default configuration values
+├── example.env         ← Example environment template
+└── README.md           ← This file
 ```
 
 ### Installed Environment (Post-install)
-By default, CSM installs everything to `/srv/stacks` (accessible via a `~/stacks` symlink in your home folder).
+By default, CSM installs everything to `/srv/stacks` (accessible via `~/stacks` symlink).
 
-```text
-# Installed layout:
-#   /srv/stacks/                    ← CSM root directory
-#   ├── .backups/                   ← automated stack tarball backup
-#   │  └── <stack>/                 ← directory to hold stack backups
-#   │     └── <stack>-YYYYMMDD_HHMMSS.tar.gz  ← backup of full stack directory
-#   ├── .configs/                   ← shared resources and tools
-#   │  ├── csm.sh                   ← main CSM script containing all helper scripts
-#   │  ├── default.conf             ← default configuration variables
-#   │  ├── local-compose.yml        ← example compose.yml for "local" Docker & Podman
-#   │  ├── swarm-compose.yml        ← example compose.yml for Docker Swarm only
-#   │  └── user.conf                ← user overrides (optional)
-#   ├── .secrets/                   ← directory for shared docker secrets
-#   │  ├── .local.env               ← Podman and Docker Local variables
-#   │  ├── .swarm.env               ← Docker Swarm specific variables
-#   │  ├── example.env              ← bare bones example .env variables
-#   │  └── <variable_name>.secret   ← one secret file per secret variable
-#   ├── .modules/                   ← pre-configured stack compose and environment vars
-#   │  └── <stack>/                 ← descriptive name of the stack
-#   │     ├── compose.yml           ← pre-made compose.yml tailored to work with CSM
-#   │     └── example.env           ← variables required for this specific compose.yml
-#   └── <stack>/                    ← directory for container stack configs and appdata
-#      ├── .env                     ← symlinked to the .scope.env / custom .env
-#      ├── compose.yml              ← stack containers configuration file
-#      └── appdata/                 ← stack appdata directory for each container
-# =============================================================================
 ```
+/srv/stacks/                     ← CSM root directory (customizable via CSM_ROOT_DIR)
+├── .backups/                    ← Automated stack backups
+│   └── <stack>/                 - Individual stack backups subfolder
+│       └── <stack>-YYYYMMDD_HHMMSS.tar.gz
+├── .configs/                    ← Shared resources and tools
+│   ├── csm.sh                   ← Main CSM script
+│   ├── csm.ini                  ← Default configuration values
+│   ├── user.conf                ← User overrides (optional)
+│   ├── local-compose.yml        ← Compose template for local/Podman
+│   ├── swarm-compose.yml        ← Compose template for Docker Swarm
+│   ├── .local.env               ← Environment variables for local mode
+│   └── .swarm.env               ← Environment variables for swarm mode
+├── .secrets/                    ← Secrets and environment variable templates
+│   ├── .local.env               ← Local mode environment variables
+│   ├── .swarm.env               ← Swarm mode environment variables
+│   ├── example.env              ← Bare bones example .env variables
+│   └── <variable_name>.secret   ← Secret file per secret variable
+├── .modules/                    ← Pre-configured stack templates (feature still in development)
+└── <stack>/                     ← Individual stack directories
+    ├── .env                     ← Stack-specific environment variables
+    ├── .local or .swarm         ← Scope marker file
+    ├── compose.yml              ← Stack containers configuration
+    └── appdata/                 ← Container data directories
+```
+
 ---
 
 ## Quick Start
@@ -129,7 +132,7 @@ By default, CSM installs everything to `/srv/stacks` (accessible via a `~/stacks
 Once installed, the `csm` command is available system-wide.
 
 ### 1. Create a new stack
-This generates the folder structure and a boilerplate `compose.yml`.
+Creates the folder structure and skeleton files for a container stack
 ```bash
 csm create my_stack
 ```
@@ -141,25 +144,17 @@ csm edit my_stack
 ```
 
 ### 3. Start the stack
-Pulls the required images and starts the containers in the background.
 ```bash
 csm up my_stack
 ```
 
-Docker Swarm has a few more options for container starting/stopping:
-```bash
-csm start my_stack
-csm stop my_stack
-```
-
-### 4. Check the status
+### 4. Check status
 ```bash
 csm ps                  # Shows all containers across all stacks
 csm status my_stack     # Shows status for a specific stack
 ```
 
-### 5. View Logs
-Follow the live logs for your stack (press `Ctrl+C` to exit).
+### 5. View logs
 ```bash
 csm logs my_stack
 ```
@@ -168,7 +163,7 @@ csm logs my_stack
 
 ## Command Reference
 
-Run `csm --help` at any time to see the full list of commands:
+Run `csm --help` at any time to see the full list of commands.
 
 ```
 csm <command> [<stack-name>] [options]
@@ -179,25 +174,25 @@ csm <command> [<stack-name>] [options]
 | Command | Aliases | Description |
 |---|---|---|
 | `create <stack>` | `c` | Scaffold a new stack directory + compose file |
-| `new <stack>` | `n` | Scaffold a new stack directory + compose file (duplicate of `create`) |
+| `new <stack>` | `n` | Alias for `create` |
 | `edit <stack>` | `e` | Open `compose.yml` in `$EDITOR` |
 | `rename <old> <new>` | `r` | Rename a stack directory |
 | `remove <stack>` | `rm` | Stop and remove containers (prompts) |
-| `delete <stack>` | `dt` | Stop and permanently delete stack + all data (prompts) |
-| `backup <stack>` | `bu` | Archive the stack directory to `.backup/` (tar.gz) |
-| `recreate <stack>` | `rc` | Delete and recreate a stack from scratch (prompts) |
+| `delete <stack>` | `dt` | Permanently delete stack + all data (prompts) |
+| `backup <stack>` | `bu` | Archive stack to `.backups/` as tar.gz |
+| `recreate <stack>` | `rc` | Delete and recreate stack from scratch (prompts) |
 | `purge [stack...]` | `xx` | Purge one or all stacks — **WARNING: FINAL** |
 
 ### Stack Operations
 
 | Command | Aliases | Description |
 |---|---|---|
-| `up <stack>` | `u` | Deploy a stack (`up -d --remove-orphans`) |
-| `down <stack>` | `d`, `dn` | Stop and remove containers (`down`) |
-| `bounce <stack>` | `b` | Bring stack down then back up (full recreate) |
+| `up <stack>` | `u` | Deploy stack (`compose up -d --remove-orphans`) |
+| `down <stack>` | `d`, `dn` | Stop and remove containers (`compose down`) |
+| `bounce <stack>` | `b` | Bring stack down then back up |
 | `start <stack>` | `st` | Start stopped containers |
 | `stop <stack>` | `sp` | Stop containers without removing |
-| `restart <stack>` | `r`, `rs` | Restart containers |
+| `restart <stack>` | `rs` | Restart containers |
 | `update <stack>` | `ud` | Pull latest images then redeploy |
 
 ### Information
@@ -205,22 +200,22 @@ csm <command> [<stack-name>] [options]
 | Command | Aliases | Description |
 |---|---|---|
 | `list` | `l`, `ls` | List all stacks with running state and scope |
-| `status <stack>` | `s` | Show container/service status for a stack |
+| `status <stack>` | `s` | Show container/service status |
 | `validate <stack>` | `v` | Validate `compose.yml` syntax |
 | `inspect <stack>` | `i` | Inspect stack configuration |
 | `logs <stack> [n]` | `g` | Follow logs (default: last 50 lines) |
 | `cd <stack>` | | Print the stack directory path |
 | `ps` | | List all containers (formatted, colorized) |
-| `net <action>` | | Network info: `list`, `host`, `inspect [name]` |
-| `template` | `t` | Template management (not yet implemented) |
+| `net <action>` | | Network info: `host`, `inspect [name]`, `list` |
+| `module` | `m` | Module management (not yet implemented) |
 
 ### Configuration
 
-| Command | Description |
-|---|---|
-| `config show` | Print active config values |
-| `config edit` | Open `user.conf` in `$EDITOR` |
-| `config reload` | Re-source config files |
+| Command | Aliases | Description |
+|---|---|---|
+| `config show` | `cfg show` | Print active config values |
+| `config edit` | `cfg edit` | Open `user.conf` in `$EDITOR` |
+| `config reload` | `cfg reload` | Re-source config files |
 
 ### Secrets Management
 
@@ -247,60 +242,71 @@ Secrets are stored in `CSM_ROOT_DIR/.secrets/` as `<name>.secret` files with `60
 
 ## Shell Aliases
 
-Source helper functions in your `.bashrc` or `.zshrc`:
+Some helpful shell aliases:
+
+| Alias | Description |
+|---|---|
+| `cds <stack>` | cd into stack directory |
+| `hostip` | Show host public IP |
+| `lancheck <container>` | Show container IP via ipinfo.io |
+| `vpncheck <container>` | Show container IP + host IP side-by-side |
 
 ```bash
 eval "$(csm --aliases)"
 ```
 
-This provides:
-
-| Alias | Description |
-|---|---|
-| `cds <stack>` | cd into `/srv/stacks/<stack>` |
-| `hostip` | Show host public IP |
-| `lancheck <container>` | Show container IP via `ipinfo.io` |
-| `vpncheck <container>` | Show container IP + host IP side-by-side (VPN leak check) |
+  Suggestion: add the above line to your `.bashrc`/`.zshrc` or `.profile` so these aliases are loaded in each terminal session.
 
 ---
 
 ## Scope Detection
 
-CSM automatically determines whether a stack should run as **Docker Swarm** or **local compose** (Docker Compose / Podman Compose). The detection order is:
+CSM automatically determines whether a stack runs as **Docker Swarm** or **local compose** (Docker Compose / Podman Compose):
 
 1. **Podman** → always local
-2. **Marker files** → `.swarm` or `.local` in the stack directory (explicit override)
-3. **Swarm inactive** → always local
+2. **Marker files** → `.swarm` or `.local` in stack directory (explicit override)
+3. **Swarm inactive** → local
 4. **Swarm active + stack deployed** → swarm
-5. **Swarm active + not deployed** → checks compose file for swarm-specific syntax (`deploy.mode`, `endpoint_mode`, `placement`)
-6. **Fallback** → local
+5. **Fallback** → local
 
-This means CSM works out of the box in any Docker or Podman environment without manual configuration. Use `.swarm` or `.local` marker files only when you need to force a specific scope.
+Use `.swarm` or `.local` marker files to force a specific scope when needed.
 
 ---
 
 ## Configuration
 
-Edit `CSM_ROOT_DIR/.configs/user.conf` (or `~/.config/csm/user.conf`) to override defaults. Environment variables with a `CSM_` prefix take highest precedence.
+Configuration values are loaded in this order (later sources override earlier):
 
-| Variable | Default | Description |
+1. **`csm.ini`** — Default values (installed to `CSM_ROOT_DIR/.configs/`)
+2. **`user.conf`** — User overrides (create via `csm config edit`)
+3. **Environment variables** — `CSM_*` prefix takes highest precedence
+
+Edit with `csm config edit` or manually edit `CSM_ROOT_DIR/.configs/user.conf`.
+
+### Configuration Variables
+
+| Variable | Default Value | Description |
 |---|---|---|
-| `CSM_CONTAINER_RUNTIME` | (auto-detected) | `docker` or `podman` |
-| `CSM_STACKS_UID` | (current user) | UID for stack directory ownership |
-| `CSM_STACKS_GID` | (runtime group) | GID for stack directory ownership |
+| `CSM_VERSION` | (from csm.ini) | CSM version |
+| `CSM_CONTAINER_RUNTIME` | (auto-detect) | `docker` or `podman` |
+| `CSM_STACKS_UID` | 1000 | UID for stack directory ownership |
+| `CSM_STACKS_GID` | 2000 | GID for stack directory ownership |
 | `CSM_ROOT_DIR` | `/srv/stacks` | Base install directory |
 | `CSM_BACKUPS_DIR` | `$CSM_ROOT_DIR/.backups` | Backup archive location |
-| `CSM_CONFIGS_DIR` | `$CSM_ROOT_DIR/.configs` | Config files and script |
-| `CSM_SECRETS_DIR` | `$CSM_ROOT_DIR/.secrets` | Secret variables and files |
+| `CSM_CONFIGS_DIR` | `$CSM_ROOT_DIR/.configs` | Config files location |
+| `CSM_MODULES_DIR` | `$CSM_ROOT_DIR/.modules` | Modules location |
+| `CSM_SECRETS_DIR` | `$CSM_ROOT_DIR/.secrets` | Secrets backup location |
 | `CSM_NETWORK_NAME` | `csm_network` | Default external network |
+| `CSM_NETWORK_SUBNET` | `172.20.0.0/16` | Network subnet (optional) |
+| `CSM_VOLUME_DRIVER` | `local` | Volume driver |
+| `CSM_BACKUP_MAX_AGE` | 30 | Backup retention (days) |
+| `CSM_BACKUP_COMPRESSION` | `zip` | Backup compression format |
 
 ---
 
-## Disclaimer:
+## Disclaimer
 
-The idea for this project can be traced back to @gkoerk (RIP) with his Docker setup and aliases for QTS, but the scripting and recent rewrite is my work.
-
-I used my own local LLM, Claude, and Gemma for code review and bug finding, but the scripting was done by me.
+The idea for this project originated from @gkoerk's Docker setup for QTS. The scripting and recent rewrite is my own work, with assistance from LLMs for code review and bug finding.
 
 ## License
 
