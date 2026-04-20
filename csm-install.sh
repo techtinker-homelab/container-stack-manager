@@ -254,16 +254,11 @@ EOF
     readonly mode_conf="660"
     readonly mode_auth="600"
 
-    # Files to install
+    # Files to install (csm.ini is handled in _vars_setup, user.conf created on first run)
     declare -A files_to_install=(
         ["${script_dir}/csm.sh"]="${csm_configs}/"
+        ["${script_dir}/csm.ini"]="${csm_configs}/"
     )
-    if [[ -f "${script_dir}/example.conf" ]]; then
-        files_to_install["${script_dir}/example.conf"]="${csm_configs}/"
-    fi
-    if [[ -f "${script_dir}/example.env" ]]; then
-        files_to_install["${script_dir}/example.env"]="${csm_configs}/"
-    fi
 
     # Optional interactive override (only if not forced)
     if [[ $force_install -eq 0 ]]; then
@@ -586,10 +581,6 @@ _setup_directories() {
 _setup_files() {
     _log STEP "_setup_files: installing CSM core files..."
 
-    local conf_example="${script_dir}/example.conf"
-    local conf_default="${csm_configs}/default.conf"
-    local conf_user="${csm_configs}/user.conf"
-
     local compose_example="${script_dir}/example-compose.yml"
     local compose_local="${csm_configs}/local-compose.yml"
     local compose_swarm="${csm_configs}/swarm-compose.yml"
@@ -598,8 +589,23 @@ _setup_files() {
     local env_local="${csm_configs}/.local.env"
     local env_swarm="${csm_configs}/.swarm.env"
 
-    # Install the core script
+    # Install the core script (already done via files_to_install)
     _install_file "${script_dir}/csm.sh" "${csm_configs}/" "$mode_exec" --force
+
+    # Ensure csm.ini exists in configs directory (may have been copied via files_to_install)
+    local csm_ini_installed="${csm_configs}/csm.ini"
+    if [[ ! -f "$csm_ini_installed" ]]; then
+        if [[ -f "${script_dir}/csm.ini" ]]; then
+            _install_file "${script_dir}/csm.ini" "${csm_configs}/" "$mode_conf"
+        fi
+    fi
+
+    # Ensure user.conf exists for user overrides
+    local user_conf="${csm_configs}/user.conf"
+    if [[ ! -f "$user_conf" || "$force_install" == 1 ]]; then
+        $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" /dev/null "$user_conf"
+        _log INFO "Initial setup: Created $user_conf for user configuration"
+    fi
 
     # Handle Env Templates
     if [[ -f "$env_example" ]]; then
@@ -623,19 +629,6 @@ _setup_files() {
             $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$compose_example" "$compose_swarm"
         fi
         _log INFO "Initial setup: Created/Overwrote local and swarm compose templates"
-    fi
-
-    # Handle Core Configurations
-    if [[ -f "$conf_example" ]]; then
-        _install_file "$conf_example" "${csm_configs}/" "$mode_conf" --force
-        if [[ ! -f "$conf_default" || "$force_install" == 1 ]]; then
-            $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$conf_example" "$conf_default"
-            _log INFO "Initial setup: Created/Overwrote $conf_default"
-        fi
-    fi
-    if [[ -f "$conf_default" ]] && [[ ! -f "$conf_user" || "$force_install" == 1 ]]; then
-        $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$conf_default" "$conf_user"
-        _log INFO "Initial setup: Created/Overwrote $conf_user"
     fi
 
     _log INFO "_setup_files: done"
@@ -770,9 +763,9 @@ _uninstall_csm() {
         _log STEP "Removing core script: ${csm_configs}/csm.sh"
         $var_sudo rm -f "${csm_configs}/csm.sh"
     fi
-    if [[ -f "${csm_configs}/default.conf" ]]; then
-        _log STEP "Removing default config: ${csm_configs}/default.conf"
-        $var_sudo rm -f "${csm_configs}/default.conf"
+    if [[ -f "${csm_configs}/csm.ini" ]]; then
+        _log STEP "Removing default config: ${csm_configs}/csm.ini"
+        $var_sudo rm -f "${csm_configs}/csm.ini"
     fi
 
     _log PASS "CSM core files and symlinks have been removed."
@@ -854,7 +847,7 @@ main() {
     echo ""
     _log PASS "CSM installation complete!"
     _log INFO "Next steps:"
-    _log INFO "  1. Edit user config : ${csm_configs}/user.conf"
+    _log INFO "  1. Edit csm.ini defaults or user.conf : ${csm_configs}/"
     _log INFO "  2. View your stacks : ${csm_dir}/"
     _log INFO "  3. Get started      : csm --help"
     if [[ "$csm_runtime" == "docker" && "$(groups)" != *docker* ]]; then
