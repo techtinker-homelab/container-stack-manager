@@ -4,6 +4,10 @@ A unified CLI tool for managing Docker and Podman Compose stacks on a single hos
 
 ---
 
+**WARNING**: This project works but probably contains bugs. Please make sure you back up any container configs before you use these scripts at your own risk. Please see the [Disclaimer](##Disclaimer) below.
+
+```
+
 ## Features
 
 - **Unified Interface**: Wraps standard `docker compose` / `podman compose` commands into short, memorable syntax (`csm up`, `csm down`, `csm logs`).
@@ -49,7 +53,7 @@ Docker or Podman will be detected automatically, or you can choose which to inst
 3. **(Optional) Customize the installation:**
    You can change defaults before running the installer:
    ```bash
-   export CSM_ROOT_DIR=/srv/containers    # default: /srv/stacks
+   export CSM_ROOT_DIR=/opt/docker        # default: /srv/stacks
    export CSM_STACKS_UID=1000             # default: 1000
    export CSM_STACKS_GID=2000             # default: 2000
    ```
@@ -306,7 +310,14 @@ Edit with `csm config edit` or manually edit `CSM_ROOT_DIR/.configs/user.conf`.
 
 ## Disclaimer
 
-The idea for this project originated from @gkoerk's Docker setup for QTS. The scripting and recent rewrite is my own work, with assistance from LLMs for code review and bug finding.
+The idea for this project originated from @gkoerk's Docker setup for QTS. The scripting and recent rewrite are my own work, with assistance from LLMs for code review and bug finding.
+
+Contributors have scripted this project to work as advertised to the best of their ability, but mistakes can and will happen. If you decide to use these scripts, you are expected to have done your own due diligence, read the scripts, and understood them — you accept all responsibility and risk associated herein.
+
+For questions or issues, I'm active in the following communities:
+- [QNAP Unofficial Discord](https://discord.gg/NaxEB4sz7G)
+- [Ugreen Official Discord](https://discord.gg/JQywpNUZU7)
+- [Techtinker Matrix](https://matrix.to/#/!AESnmgfDCZGhIREtbb:matrix.org?via=matrix.org)
 
 ## License
 
