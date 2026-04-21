@@ -321,4 +321,4 @@ For questions or issues, I'm active in the following communities:
 
 ## License
 
-MIT License – see [LICENSE](LICENSE) for details.
+Use of this project is governed by the BSD 3-Clause License – see [LICENSE](LICENSE) for details.
