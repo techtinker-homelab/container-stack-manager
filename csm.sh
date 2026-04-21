@@ -1390,6 +1390,13 @@ lancheck() { echo "Container IP: \$(${csm_cmd} container exec -it "\${*}" curl -
 vpncheck() { echo "Container IP: \$(${csm_cmd} container exec -it "\${*}" curl -fsSL ipinfo.io/ip 2>/dev/null || wget -qO- ipinfo.io/ip)" && \\
             echo "     Host IP: \$(curl -fsSL ifconfig.me 2>/dev/null || wget -qO- ifconfig.me)"; }
 
+# Create encryption key
+keygen() { openssl rand -hex ${1:-32}; }
+ctupd() {
+    [[ -z $1 ]] || echo "Usage: dcupdate <container-name>"; return 0
+    $csm_cmd run --rm --name "$1-update" -v /var/run/$csm_cmd.sock:/var/run/$csm_cmd.sock ghcr.io/nicholas-fedor/watchtower --run-once "$1";
+}
+
 # cd into stacks directory or a specific stack
 alias cds='cd ${csm_dir}'
 ALIAS

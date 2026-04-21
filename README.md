@@ -254,6 +254,8 @@ Some helpful shell aliases:
 | `hostip` | Show host public IP |
 | `lancheck <container>` | Show container IP via ipinfo.io |
 | `vpncheck <container>` | Show container IP + host IP side-by-side |
+| `keygen [number:-32]` | Generates random value using "openssl rand -hex ## (32 is default) |
+| `ctupd <container>` | Updates container using nicholas-fedor's Watchtower fork. |
 
 ```bash
 eval "$(csm --aliases)"
