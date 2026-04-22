@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# csm-install.sh  –  Container Stack Manager Installer
+# csm-install.sh - Container Stack Manager Installer
 # =============================================================================
 
 set -euo pipefail
@@ -27,7 +27,7 @@ set -euo pipefail
 
 LOCKFILE="/var/lock/csm-install.lock"
 if ! command -v flock >/dev/null 2>&1; then
-    echo "WARNING: flock not found – install util-linux or coreutils for safety." >&2
+    echo "WARNING: flock not found - install util-linux or coreutils for safety." >&2
     exit 1
 fi
 exec 200>"$LOCKFILE"
@@ -40,6 +40,9 @@ fi
 # GLOBAL INSTALLATION VARIABLES, SET TO "1" VIA COMMAND OPTIONS
 # =============================================================================
 
+csm_version="0.4.5"
+
+# Install operation flags
 dry_run=0
 csm_debug=0
 force_install=0
@@ -148,37 +151,77 @@ _confirm_no() {
 
 _vars_setup() {
     local csm_ini_file="${script_dir}/csm.ini"
-    csm_vars=(
-        "CSM_VERSION"
-        "CSM_CONTAINER_RUNTIME"
-        "CSM_STACKS_GID"
-        "CSM_STACKS_UID"
-        "CSM_ROOT_DIR"
-        "CSM_BACKUPS_DIR"
-        "CSM_CONFIGS_DIR"
-        "CSM_MODULES_DIR"
-        "CSM_SECRETS_DIR"
-        "CSM_NETWORK_NAME"
-        "CSM_NETWORK_SUBNET"
-        "CSM_VOLUME_DRIVER"
-        "CSM_VOLUME_LABEL"
-        "CSM_MODULE_SOURCE"
-        "CSM_MODULE_BRANCH"
-        "CSM_MODULE_REPO_NAME"
-        "CSM_MODULE_UPDATE_INTERVAL"
-        "CSM_MODULE_GITHUB_OWNER"
-        "CSM_MODULE_GITHUB_URL"
-        "CSM_MODULE_GITHUB_RAW"
-        "CSM_MODULE_GITLAB_OWNER"
-        "CSM_MODULE_GITLAB_URL"
-        "CSM_MODULE_GITLAB_RAW"
-        "CSM_BACKUP_MAX_AGE"
-        "CSM_BACKUP_COMPRESSION"
-        "CSM_ENV_TEMP"
-        "CSM_ENV_PROD"
-        "CSM_COMPOSE_TEMP"
-        "CSM_COMPOSE_PROD"
+    # Global config variables - ordered list and values
+    declare -ga csm_var_order
+    csm_var_order=(
+        CSM_VERSION
+        CSM_CONTAINER_RUNTIME
+        CSM_STACKS_GID
+        CSM_STACKS_UID
+        CSM_ROOT_DIR
+        CSM_BACKUPS_DIR
+        CSM_CONFIGS_DIR
+        CSM_MODULES_DIR
+        CSM_SECRETS_DIR
+        CSM_NETWORK_NAME
+        CSM_NETWORK_SUBNET
+        CSM_VOLUME_DRIVER
+        CSM_VOLUME_LABEL
+        CSM_MODULE_SOURCE
+        CSM_MODULE_BRANCH
+        CSM_MODULE_REPO_NAME
+        CSM_MODULE_UPDATE_INTERVAL
+        CSM_MODULE_GITLAB_OWNER
+        CSM_MODULE_GITLAB_URL
+        CSM_MODULE_GITLAB_RAW
+        CSM_MODULE_CODEBERG_OWNER
+        CSM_MODULE_CODEBERG_URL
+        CSM_MODULE_CODEBERG_RAW
+        CSM_MODULE_GITHUB_OWNER
+        CSM_MODULE_GITHUB_URL
+        CSM_MODULE_GITHUB_RAW
+        CSM_BACKUP_MAX_AGE
+        CSM_BACKUP_COMPRESSION
+        CSM_ENV_TEMP
+        CSM_ENV_LOCAL
+        CSM_ENV_SWARM
+        CSM_COMPOSE_TEMP
+        CSM_COMPOSE_PROD
     )
+    declare -gA csm_vars
+    csm_vars[CSM_VERSION]="${csm_version:-undefined}"
+    csm_vars[CSM_CONTAINER_RUNTIME]=""
+    csm_vars[CSM_STACKS_GID]="2000"
+    csm_vars[CSM_STACKS_UID]=""
+    csm_vars[CSM_ROOT_DIR]="/srv/stacks"
+    csm_vars[CSM_BACKUPS_DIR]="\${CSM_ROOT_DIR}/.backups"
+    csm_vars[CSM_CONFIGS_DIR]="\${CSM_ROOT_DIR}/.configs"
+    csm_vars[CSM_MODULES_DIR]="\${CSM_ROOT_DIR}/.modules"
+    csm_vars[CSM_SECRETS_DIR]="\${CSM_ROOT_DIR}/.secrets"
+    csm_vars[CSM_NETWORK_NAME]="csm_network"
+    csm_vars[CSM_NETWORK_SUBNET]="172.20.0.0/16"
+    csm_vars[CSM_VOLUME_DRIVER]="local"
+    csm_vars[CSM_VOLUME_LABEL]="csm-volume"
+    csm_vars[CSM_MODULE_SOURCE]="gitlab"
+    csm_vars[CSM_MODULE_BRANCH]="main"
+    csm_vars[CSM_MODULE_REPO_NAME]="csm-modules"
+    csm_vars[CSM_MODULE_UPDATE_INTERVAL]="7"
+    csm_vars[CSM_MODULE_GITLAB_OWNER]="techtinker"
+    csm_vars[CSM_MODULE_GITLAB_URL]="https://gitlab.com/\${CSM_MODULE_GITLAB_OWNER}/\${CSM_MODULE_REPO_NAME}"
+    csm_vars[CSM_MODULE_GITLAB_RAW]="https://gitlab.com/\${CSM_MODULE_GITLAB_OWNER}/\${CSM_MODULE_REPO_NAME}/-/\raw/\${CSM_MODULE_BRANCH}"
+    csm_vars[CSM_MODULE_CODEBERG_OWNER]="techtinker"
+    csm_vars[CSM_MODULE_CODEBERG_URL]="https://codeberg.org/\${CSM_MODULE_CODEBERG_OWNER}/\${CSM_MODULE_REPO_NAME}"
+    csm_vars[CSM_MODULE_CODEBERG_RAW]="https://codeberg.org/\${CSM_MODULE_CODEBERG_OWNER}/\${CSM_MODULE_REPO_NAME}/raw/\branch/\${CSM_MODULE_BRANCH}"
+    csm_vars[CSM_MODULE_GITHUB_OWNER]="techtinker-homelab"
+    csm_vars[CSM_MODULE_GITHUB_URL]="https://github.com/\${CSM_MODULE_GITHUB_OWNER}/\${CSM_MODULE_REPO_NAME}"
+    csm_vars[CSM_MODULE_GITHUB_RAW]="https://raw.githubusercontent.com/\${CSM_MODULE_GITHUB_OWNER}/\${CSM_MODULE_REPO_NAME}/\${CSM_MODULE_BRANCH}"
+    csm_vars[CSM_BACKUP_MAX_AGE]="30"
+    csm_vars[CSM_BACKUP_COMPRESSION]="gz"
+    csm_vars[CSM_ENV_TEMP]="example.env"
+    csm_vars[CSM_ENV_LOCAL]="local.env"
+    csm_vars[CSM_ENV_SWARM]="swarm.env"
+    csm_vars[CSM_COMPOSE_TEMP]="local-compose.yml"
+    csm_vars[CSM_COMPOSE_PROD]="swarm-compose.yml"
 
     # Create fresh csm.ini if it does not exist (fallback defaults)
     if [[ ! -f "$csm_ini_file" ]]; then
@@ -187,39 +230,12 @@ _vars_setup() {
             cp "$csm_ini_temp" "$csm_ini_file"
             _log STEP "Copied default config template to $csm_ini_file"
         else
-            # Fallback: minimal defaults (move hardcoded values here)
-            cat >"$csm_ini_file" <<'EOF'
-# Default CSM configuration – generated by csm-install.sh
-CSM_VERSION=0.3.4
-CSM_CONTAINER_RUNTIME=
-CSM_STACKS_GID=2000
-CSM_STACKS_UID=2000
-CSM_ROOT_DIR="/srv/stacks"
-CSM_BACKUPS_DIR="${CSM_ROOT_DIR}/.backups"
-CSM_CONFIGS_DIR="${CSM_ROOT_DIR}/.configs"
-CSM_MODULES_DIR="${CSM_ROOT_DIR}/.modules"
-CSM_SECRETS_DIR="${CSM_ROOT_DIR}/.secrets"
-CSM_NETWORK_NAME="csm_network"
-CSM_NETWORK_SUBNET=
-CSM_VOLUME_DRIVER=
-CSM_VOLUME_LABEL=
-CSM_MODULE_SOURCE=
-CSM_MODULE_BRANCH="main"
-CSM_MODULE_REPO_NAME=
-CSM_MODULE_UPDATE_INTERVAL=
-CSM_MODULE_GITHUB_OWNER="techtinker"
-CSM_MODULE_GITHUB_URL="https://github.com/${CSM_MODULE_GITHUB_OWNER}/${CSM_MODULE_REPO_NAME}"
-CSM_MODULE_GITHUB_RAW="https://raw.githubusercontent.com/${CSM_MODULE_GITHUB_OWNER}/${CSM_MODULE_REPO_NAME}/${CSM_MODULE_BRANCH}"
-CSM_MODULE_GITLAB_OWNER=
-CSM_MODULE_GITLAB_URL="https://gitlab.com/${CSM_MODULE_GITLAB_OWNER}/${CSM_MODULE_REPO_NAME}"
-CSM_MODULE_GITLAB_RAW="https://gitlab.com/${CSM_MODULE_GITLAB_OWNER}/${CSM_MODULE_REPO_NAME}/-/raw/${CSM_MODULE_BRANCH}"
-CSM_BACKUP_MAX_AGE=30
-CSM_BACKUP_COMPRESSION="gz"
-CSM_ENV_TEMP="example.env"
-CSM_ENV_PROD="example.env"
-CSM_COMPOSE_TEMP="local-compose.yml"
-CSM_COMPOSE_PROD="swarm-compose.yml"
-EOF
+            {   echo "# Default CSM configuration - generated by csm-install.sh"
+                echo "# csm_version = ${csm_vars[CSM_VERSION]:-undefined}"
+                for var in "${csm_var_order[@]}"; do
+                    echo "${var}=${csm_vars[$var]}"
+                done
+            } >"$csm_ini_file"
             _log WARN "Created minimal config file at: $csm_ini_file"
         fi
     fi
@@ -227,9 +243,21 @@ EOF
     # Load defaults from csm.ini
     source "$csm_ini_file"
 
+    # Store all CSM_* values in associative array for unified handling
+    declare -gA csm_values
+    for var in "${!csm_var_order[@]}"; do
+        local val=""
+        if [[ -v "$var" ]]; then
+            val="${!var}"
+        fi
+        csm_values[$var]="$val"
+    done
+
+    # User overrides (populated in _user_input, written to user.conf in _setup_files)
+
     # Map CSM_* names to internal vars with defaults
     csm_version="${CSM_VERSION:-undefined}"
-    csm_runtime="${CSM_CONTAINER_RUNTIME:-}"
+    csm_runtime="${CSM_CONTAINER_RUNTIME:-docker}"
     csm_net_name="${CSM_NETWORK_NAME:-csm_network}"
     csm_gid="${csm_gid:-${CSM_STACKS_GID:-2000}}"
     csm_uid="${CSM_STACKS_UID:-${SUDO_UID:-$(id -u)}}"
@@ -270,25 +298,57 @@ _user_input() {
     if [[ "$force_install" == 1 ]]; then return 0; fi
     _log STEP "csm_configs=${csm_configs}, user_conf would be: ${csm_configs}/user.conf"
 
-    # user.conf will be created in _setup_files if it doesn't exist
+    # Ordered list of user prompted vars
+    declare -ga csm_var_prompt
+    csm_var_prompt=(
+        CSM_CONTAINER_RUNTIME
+        CSM_STACKS_GID
+        CSM_STACKS_UID
+        CSM_ROOT_DIR
+        CSM_NETWORK_NAME
+        CSM_NETWORK_SUBNET
+        CSM_VOLUME_DRIVER
+        # Modules are not yet implemented
+        # CSM_MODULE_SOURCE
+        # CSM_MODULE_BRANCH
+        # CSM_MODULE_REPO_NAME
+        # CSM_MODULE_UPDATE_INTERVAL
+        CSM_BACKUP_MAX_AGE
+        CSM_BACKUP_COMPRESSION
+        CSM_ENV_LOCAL
+        CSM_ENV_SWARM
+        )
+    declare -gA user_overrides
+
+    # Load existing user.conf if it exists
     local user_conf="${csm_configs}/user.conf"
     _log STEP "user_conf path: ${user_conf}"
+    if [[ -f "$user_conf" ]]; then
+        while IFS='=' read -r key val; do
+            [[ -n "$key" && -n "${csm_vars[$key]:-}" ]] && user_overrides[$key]="$val"
+        done < "$user_conf"
+    fi
 
+    if _confirm_no "Reset all values to defaults?"; then
+        _log STEP "_user_input: resetting to defaults"
+        for var in "${csm_var_prompt[@]}"; do
+            user_overrides[$var]="${csm_vars[$var]}"
+        done
+        _log INFO "All values reset to defaults"
+    fi
     if _confirm_no "Do you want to manually edit any of the configuration values?"; then
         _log STEP "_user_input: user reply: y/n: ${reply}"
         _log INFO "Press ENTER to keep the current value in brackets."
         local var cur new
-        for var in "${csm_vars[@]}"; do
-            cur="${!var}"
-            read -r -p "${ylw}${bld}Current value for ${var} [$cur]: ${rst}" new
+        _log STEP "Total vars to prompt: ${#csm_var_prompt[@]}"
+        for var in "${csm_var_prompt[@]}"; do
+            # Prefer user_overrides if set, else csm_values, else csm_vars defaults
+            cur="${user_overrides[$var]:-}"
+            [[ -z "$cur" ]] && cur="${csm_values[$var]:-}"
+            [[ -z "$cur" ]] && cur="${csm_vars[$var]:-}"
+            read -r -p "${ylw}${bld}Current value for ${var} [${cur}]: ${rst}" new
             if [[ -n "$new" ]]; then
-                export "${var}=${new}"
-                # Persist to user.conf
-                if grep -q "^${var}=" "$user_conf" 2>/dev/null; then
-                    sed -i "s|^${var}=.*|${var}=${new}|" "$user_conf"
-                else
-                    echo "${var}=${new}" >>"$user_conf"
-                fi
+                user_overrides[$var]="$new"
                 _log STEP "Updated ${var}: ${cur} → ${new}"
             fi
         done
@@ -305,14 +365,14 @@ _detect_pkg_manager() {
     elif command -v yum     >/dev/null 2>&1; then pkg_mgr="yum"
     elif command -v pacman  >/dev/null 2>&1; then pkg_mgr="pacman"
     else
-        _log WARN "Unsupported package manager – install curl, git manually if needed."
+        _log WARN "Unsupported package manager - install curl, git manually if needed."
         pkg_mgr=""
     fi
     _log STEP "_detect_pkg_manager: detected=$pkg_mgr"
 }
 
 _install_pkg() {
-    if [[ -z "${pkg_mgr:-}" ]]; then _log WARN "No pkg manager – skipping: $*"; return 0; fi
+    if [[ -z "${pkg_mgr:-}" ]]; then _log WARN "No pkg manager - skipping: $*"; return 0; fi
     _log STEP "_install_pkg: using $pkg_mgr to install: $*"
     case "$pkg_mgr" in
         apt-get)
@@ -383,7 +443,7 @@ _install_podman() {
 _install_runtime() {
     _log STEP "_install_runtime: checking for existing runtime..."
     if _detect_runtime; then
-        _log INFO "Container runtime already installed – skipping installation."
+        _log INFO "Container runtime already installed - skipping installation."
         return 0
     fi
 
@@ -406,6 +466,12 @@ _install_runtime() {
     fi
 }
 
+_detect_swarm() {
+    local swarm_state
+    swarm_state="$($var_sudo docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null)"
+    if [[ "$swarm_state" == "active" ]]; then return 0; else return 1; fi
+}
+
 _configure_swarm() {
     _log STEP "_configure_swarm: configuring Docker deployment mode..."
 
@@ -420,7 +486,7 @@ _configure_swarm() {
             _log STEP "_configure_swarm: Swarm mode selected."
 
             # Check if already in a swarm
-            if $var_sudo docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null | grep -q "active"; then
+            if [[ $(_detect_swarm) ]]; then
                 _log PASS "Docker is already active in Swarm mode."
                 return 0
             fi
@@ -464,7 +530,7 @@ _check_service() {
         docker)
             _log STEP "Checking Docker service..."
             if ! command -v systemctl >/dev/null 2>&1; then
-                _log WARN "systemctl not found – skipping service check."
+                _log WARN "systemctl not found - skipping service check."
                 return 0
             fi
             _log STEP "_check_service: checking systemctl is-active docker"
@@ -484,7 +550,7 @@ _check_service() {
         podman)
             _log STEP "Checking Podman socket..."
             if ! command -v systemctl >/dev/null 2>&1; then
-                _log WARN "systemctl not found – skipping service check."
+                _log WARN "systemctl not found - skipping service check."
                 return 0
             fi
             _log STEP "_check_service: checking systemctl is-active podman.socket"
@@ -657,12 +723,29 @@ _setup_files() {
 
     # Create/ensure user.conf exists for user overrides
     local user_conf="${csm_configs}/user.conf"
-    if [[ ! -f "$user_conf" || "$force_install" == 1 ]]; then
+    if [[ ! -f "$user_conf" || "$force_install" == 1 || "${#user_overrides[@]}" -gt 0 ]]; then
         if [[ "$dry_run" == 1 ]]; then
             _log INFO "Would create user.conf at ${csm_configs}/ (mode: $mode_conf)"
         else
-            $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" /dev/null "$user_conf"
-            _log INFO "Created user.conf for user configuration"
+            if [[ ! -f "$user_conf" ]]; then
+                $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" /dev/null "$user_conf"
+            fi
+            # Merge csm_values with user_overrides (user overrides take precedence)
+            declare -A merged_values
+            for var in "${csm_var_order[@]}"; do
+                local val="${csm_values[$var]:-}"
+                [[ -n "$val" ]] && merged_values[$var]="$val"
+            done
+            for var in "${!user_overrides[@]}"; do
+                merged_values[$var]="${user_overrides[$var]}"
+            done
+            # Write merged values to file once (in order from csm_var_order)
+            : >"$user_conf"
+            for var in "${csm_var_order[@]}"; do
+                local val="${merged_values[$var]:-}"
+                [[ -n "$val" ]] && echo "${var}=${val}" >>"$user_conf"
+            done
+            _log INFO "Created user.conf with merged defaults and user overrides"
         fi
     else
         _log INFO "user.conf already exists"
@@ -748,7 +831,7 @@ _setup_network() {
             ;;
         docker)
             # Check if Swarm is active to determine network driver
-            if $var_sudo docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null | grep -q "active"; then
+            if [[ $(_detect_swarm) ]]; then
                 if [[ "$dry_run" == 1 ]]; then
                     _log INFO "Would create Docker Swarm overlay network '$net_name'"
                 else
@@ -1023,7 +1106,7 @@ main() {
     fi
 
     # Handle installation
-    _log INFO "Container Stack Manager v${CSM_VERSION} – installer starting"
+    _log INFO "Container Stack Manager v${CSM_VERSION} - installer starting"
     if [[ "$force_install" == 1 ]]; then
         _log WARN "FORCE MODE ACTIVE: Existing configs will be overwritten and prompts bypassed."
     fi
