@@ -246,13 +246,29 @@ _vars_setup() {
 
     # Store all CSM_* values in associative array for unified handling
     declare -gA csm_values
-    for var in "${csm_var_order[@]}"; do
-        local val=""
-        if [[ -v "$var" ]]; then
-            val="${!var}"
+    while IFS='=' read -r key val; do
+        if [[ -n "$key" ]]; then
+            val="${val%%#*}"  # Strip comments
+            val="${val#"${val%%[![:space:]]*}"}"  # Trim leading spaces
+            val="${val%"${val##*[![:space:]]}"}"  # Trim trailing spaces
+            # Basic validation
+            case "$key" in
+                CSM_BACKUP_MAX_AGE|CSM_STACKS_GID|CSM_STACKS_UID|CSM_MODULE_UPDATE_INTERVAL)
+                    if ! [[ "$val" =~ ^[0-9]+$ ]]; then
+                        _log WARN "Invalid numeric value for $key: '$val', using default"
+                        val="${csm_vars[$key]:-}"
+                    fi
+                    ;;
+                CSM_ROOT_DIR)
+                    if [[ -n "$val" && "$val" != /* ]]; then
+                        _log WARN "CSM_ROOT_DIR must be absolute path: '$val', using default"
+                        val="${csm_vars[$key]:-}"
+                    fi
+                    ;;
+            esac
+            csm_values[$key]="$val"
         fi
-        csm_values[$var]="$val"
-    done
+    done < <(grep -v '^#' "$csm_ini_file" | grep '=')
     _log INFO "Loaded ${#csm_values[@]} config values from csm.ini"
 
     # User overrides (populated in _user_input, written to user.conf in _setup_files)
@@ -282,6 +298,7 @@ _vars_setup() {
 
     readonly csm_link="${HOME}/stacks"
     readonly bin_link="/usr/local/bin/csm"
+    readonly csm_user_conf="${HOME}/.config/csm/user.conf"
 
     # Permission modes (move to csm.ini if configurable, else keep here)
     readonly mode_dirs="770"
@@ -294,11 +311,12 @@ _vars_setup() {
         ["${script_dir}/csm.sh"]="${csm_configs}/"
         ["${script_dir}/csm.ini"]="${csm_configs}/"
     )
+    _log STEP "_vars_setup complete: runtime=${csm_runtime}, dir=${csm_dir}, configs=${csm_configs}"
 }
 
 _user_input() {
     if [[ "$force_install" == 1 ]]; then return 0; fi
-    _log STEP "csm_configs=${csm_configs}, user_conf would be: ${csm_configs}/user.conf"
+    _log STEP "_user_input: csm_configs=${csm_configs}"
 
     # Ordered list of user prompted vars
     declare -ga csm_var_prompt
@@ -323,12 +341,12 @@ _user_input() {
     declare -gA user_overrides
 
     # Load existing user.conf if it exists
-    local user_conf="${csm_configs}/user.conf"
-    _log STEP "user_conf path: ${user_conf}"
+    local user_conf="${csm_user_conf}"
     if [[ -f "$user_conf" ]]; then
         while IFS='=' read -r key val; do
             [[ -n "$key" && -n "${csm_vars[$key]:-}" ]] && user_overrides[$key]="$val"
         done < "$user_conf"
+        _log INFO "Loaded ${#user_overrides[@]} values from existing user.conf"
     fi
 
     if _confirm_no "Reset all values to defaults?"; then
@@ -339,21 +357,21 @@ _user_input() {
         _log INFO "All values reset to defaults"
     fi
     if _confirm_no "Do you want to manually edit any of the configuration values?"; then
-        _log STEP "_user_input: user reply: y/n: ${reply}"
         _log INFO "Press ENTER to keep the current value in brackets."
-        local var cur new
-        _log STEP "Total vars to prompt: ${#csm_var_prompt[@]}"
+        local var cur new updated=0
+        _log INFO "Prompting for ${#csm_var_prompt[@]} variables..."
         for var in "${csm_var_prompt[@]}"; do
-            # Prefer user_overrides if set, else csm_values, else csm_vars defaults
             cur="${user_overrides[$var]:-}"
             [[ -z "$cur" ]] && cur="${csm_values[$var]:-}"
             [[ -z "$cur" ]] && cur="${csm_vars[$var]:-}"
-            read -r -p "${ylw}${bld}Current value for ${var} [${cur}]: ${rst}" new
+            read -r -p "Current value for ${var} [${cur}]: " new
             if [[ -n "$new" ]]; then
                 user_overrides[$var]="$new"
-                _log STEP "Updated ${var}: ${cur} → ${new}"
+                _log INFO "Set ${var}=${new}"
+                updated=$((updated + 1))
             fi
         done
+        _log INFO "Updated ${updated} values in user.conf"
     fi
 }
 
@@ -682,11 +700,11 @@ _setup_folders() {
     )
     for dir in "${target_dirs[@]}"; do
         if [[ ! -d "$dir" ]]; then
-            _log INFO "Directory '$dir' does not exist"
             if [[ "$dry_run" == 1 ]]; then
                 _log INFO "Would create directory '$dir' (mode: $mode_dirs)"
             else
                 _install_dir "$dir" "$mode_dirs"
+                _log INFO "Created directory: $dir"
             fi
         else
             _log INFO "Directory '$dir' already exists"
@@ -725,12 +743,21 @@ _setup_files() {
 
     # Create/ensure user.conf exists for user overrides
     local user_conf="${csm_configs}/user.conf"
-    if [[ ! -f "$user_conf" || "$force_install" == 1 || "${#user_overrides[@]}" -gt 0 ]]; then
+    local user_conf_global="${csm_user_conf}"
+    _log STEP "user.conf exists: $([[ -f "$user_conf" ]] && echo yes || echo no)"
+    _log STEP "user_overrides count: ${#user_overrides[@]}"
+    _log STEP "force_install: $force_install"
+    if [[ ! -f "$user_conf_global" || "$force_install" == 1 || "${#user_overrides[@]}" -gt 0 ]]; then
         if [[ "$dry_run" == 1 ]]; then
             _log INFO "Would create user.conf at ${csm_configs}/ (mode: $mode_conf)"
+            _log INFO "Would create user.conf at ${user_conf_global} (mode: $mode_conf)"
         else
             if [[ ! -f "$user_conf" ]]; then
                 $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" /dev/null "$user_conf"
+            fi
+            mkdir -p "$(dirname "$user_conf_global")"
+            if [[ ! -f "$user_conf_global" ]]; then
+                install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" /dev/null "$user_conf_global"
             fi
             # Merge csm_values with user_overrides (user overrides take precedence)
             declare -A merged_values
@@ -739,18 +766,26 @@ _setup_files() {
                 [[ -n "$val" ]] && merged_values[$var]="$val"
             done
             for var in "${!user_overrides[@]}"; do
-                merged_values[$var]="${user_overrides[$var]}"
+                local val="${user_overrides[$var]:-}"
+                [[ -n "$val" ]] && merged_values[$var]="$val"
+            done
+            _log STEP "merged_values contains ${#merged_values[@]} values"
+            for var in "${csm_var_order[@]}"; do
+                local val="${merged_values[$var]:-}"
+                [[ -n "$val" ]] && _log INFO "will_write: ${var}=${val}"
             done
             # Write merged values to file once (in order from csm_var_order)
             : >"$user_conf"
+            : >"$user_conf_global"
+            local written=0
             for var in "${csm_var_order[@]}"; do
                 local val="${merged_values[$var]:-}"
-                [[ -n "$val" ]] && echo "${var}=${val}" >>"$user_conf"
+                [[ -n "$val" ]] && echo "${var}=${val}" >>"$user_conf" && echo "${var}=${val}" >>"$user_conf_global" && ((written++))
             done
-            _log INFO "Created user.conf with merged defaults and user overrides"
+            _log INFO "Wrote ${written} values to user.conf files"
         fi
     else
-        _log INFO "user.conf already exists"
+        _log INFO "user.conf already exists, using existing values"
     fi
 
     # Handle Env Templates
