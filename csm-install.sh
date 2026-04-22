@@ -14,7 +14,7 @@ set -euo pipefail
 #   - Detect OS package manager
 #   - Detect or install container runtime (Docker or Podman)
 #   - Check / start the container service
-#   - Check / create the docker user + group (UID/GID 2000, Docker only)
+#   - Check / create the container runtime group (GID 2000)
 #   - Create the CSM directory structure with correct permissions
 #   - Install core CSM files
 #   - Create ~/stacks symlink pointing to CSM_DIR
@@ -40,6 +40,8 @@ fi
 # GLOBAL INSTALLATION VARIABLES, SET TO "1" VIA COMMAND OPTIONS
 # =============================================================================
 
+dry_run=0
+csm_debug=0
 force_install=0
 uninstall_mode=0
 
@@ -98,6 +100,11 @@ _color_setup() {
 _log() {
     local level="${1:-INFO}" message="${2:-}"
     local color
+    local prefix=""
+
+    # Add DRY-RUN prefix if in dry-run mode
+    if [[ "${dry_run:-0}" == "1" ]]; then prefix="[DRY-RUN] "; fi
+
     case "$level" in
         EXIT|FAIL)  color="${red}" ;;
         INFO)       color="${cyn}" ;;
@@ -108,7 +115,8 @@ _log() {
                     message="[Unknown log type: '${level}'] $message"
                     ;;
     esac
-    printf "%s %-4s >> %s%s\n" "${color}${bld}" "${level}" "${message}" "${rst}" >&2
+    printf " %s%s%-4s >> %s%s%s %s<<%s\n" \
+        "${color}" "${bld}" "${level}" "${prefix}" "${rst}" "${message}" "${color}" "${rst}" >&2
     if [[ "$level" == "EXIT" ]]; then exit 1; fi
 }
 
@@ -117,17 +125,21 @@ _die() { _log FAIL "$1"; exit 1; }
 _confirm_yes() {
     if [[ "$force_install" == 1 ]]; then return 0; fi
     local prompt="${1:-Are you sure?}"
-    read -r -p "${ylw}${bld} ${prompt} [Y/n]: ${rst}" reply
-    if [[ -z "${reply}" || "${reply,,}" == "y" ]]; then return 0; fi
-    return 1 # Explicitly return 1 so the script doesn't crash
+    read -r -p "${prompt} [Y/n]: " reply
+    case "${reply,,}" in
+        y|yes|"") return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 _confirm_no() {
     if [[ "$force_install" == 1 ]]; then return 0; fi
     local prompt="${1:-Are you sure?}"
-    read -r -p "${ylw}${bld}  ${prompt} [y/N]: ${rst}" reply
-    if [[ "${reply,,}" == "y" ]]; then return 0; fi
-    return 1 # Explicitly return 1
+    read -r -p "${prompt} [y/N]: " reply
+    case "${reply,,}" in
+        y|yes) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # =============================================================================
@@ -136,7 +148,7 @@ _confirm_no() {
 
 _vars_setup() {
     local csm_ini_file="${script_dir}/csm.ini"
-    local csm_vars=(
+    csm_vars=(
         "CSM_VERSION"
         "CSM_CONTAINER_RUNTIME"
         "CSM_STACKS_GID"
@@ -220,7 +232,7 @@ EOF
     csm_runtime="${CSM_CONTAINER_RUNTIME:-}"
     csm_net_name="${CSM_NETWORK_NAME:-csm_network}"
     csm_gid="${csm_gid:-${CSM_STACKS_GID:-2000}}"
-    csm_uid="${CSM_STACKS_UID:-$(id -u)}"
+    csm_uid="${CSM_STACKS_UID:-${SUDO_UID:-$(id -u)}}"
 
     # Map CSM_ dir vars to internal vars with defaults
     csm_dir="${CSM_ROOT_DIR:-/srv/stacks}"
@@ -254,13 +266,16 @@ EOF
     )
 }
 
-_interactive_config_prompt() {
+_user_input() {
     if [[ "$force_install" == 1 ]]; then return 0; fi
+    _log STEP "csm_configs=${csm_configs}, user_conf would be: ${csm_configs}/user.conf"
 
     # user.conf will be created in _setup_files if it doesn't exist
     local user_conf="${csm_configs}/user.conf"
+    _log STEP "user_conf path: ${user_conf}"
 
     if _confirm_no "Do you want to manually edit any of the configuration values?"; then
+        _log STEP "_user_input: user reply: y/n: ${reply}"
         _log INFO "Press ENTER to keep the current value in brackets."
         local var cur new
         for var in "${csm_vars[@]}"; do
@@ -329,20 +344,20 @@ _get_perms() {
 # CONTAINER RUNTIME DETECTION / INSTALLATION
 # =============================================================================
 
-_detect_container_runtime() {
+_detect_runtime() {
     if command -v docker >/dev/null 2>&1; then
         _log PASS "Docker found: $(docker --version)"
         csm_runtime="docker"
-        _log STEP "_detect_container_runtime: docker detected"
+        _log STEP "_detect_runtime: docker detected"
         return 0
     elif command -v podman >/dev/null 2>&1; then
         _log PASS "Podman found: $(podman --version)"
         csm_runtime="podman"
         csm_group="podman"
-        _log STEP "_detect_container_runtime: podman detected"
+        _log STEP "_detect_runtime: podman detected"
         return 0
     fi
-    _log STEP "_detect_container_runtime: no runtime found"
+    _log STEP "_detect_runtime: no runtime found"
     return 1
 }
 
@@ -365,9 +380,9 @@ _install_podman() {
     csm_runtime="podman"
 }
 
-_install_container_runtime() {
-    _log STEP "_install_container_runtime: checking for existing runtime..."
-    if _detect_container_runtime; then
+_install_runtime() {
+    _log STEP "_install_runtime: checking for existing runtime..."
+    if _detect_runtime; then
         _log INFO "Container runtime already installed – skipping installation."
         return 0
     fi
@@ -379,7 +394,7 @@ _install_container_runtime() {
 
     local choice=""
     read -r -p "${ylw}${bld} Select [1/2]: ${rst}" choice
-    _log STEP "_install_container_runtime: user choice=$choice"
+    _log STEP "_install_runtime: user choice=$choice"
     case "$choice" in
         1|docker) _install_docker ;;
         2|podman) _install_podman ;;
@@ -443,8 +458,8 @@ _configure_swarm() {
 # CONTAINER SERVICE CHECK
 # =============================================================================
 
-_check_container_service() {
-    _log STEP "_check_container_service: runtime=$csm_runtime"
+_check_service() {
+    _log STEP "_check_service: runtime=$csm_runtime"
     case "$csm_runtime" in
         docker)
             _log STEP "Checking Docker service..."
@@ -452,14 +467,14 @@ _check_container_service() {
                 _log WARN "systemctl not found – skipping service check."
                 return 0
             fi
-            _log STEP "_check_container_service: checking systemctl is-active docker"
+            _log STEP "_check_service: checking systemctl is-active docker"
             if systemctl is-active --quiet docker; then
                 _log PASS "Docker service is running."
                 return 0
             fi
             _log WARN "Docker service is not running."
             _confirm_yes "Start Docker now?" && {
-                _log STEP "_check_container_service: running systemctl start docker"
+                _log STEP "_check_service: running systemctl start docker"
                 $var_sudo systemctl start docker
                 systemctl is-active --quiet docker \
                     && _log PASS "Docker started." \
@@ -472,14 +487,14 @@ _check_container_service() {
                 _log WARN "systemctl not found – skipping service check."
                 return 0
             fi
-            _log STEP "_check_container_service: checking systemctl is-active podman.socket"
+            _log STEP "_check_service: checking systemctl is-active podman.socket"
             if systemctl is-active --quiet podman.socket 2>/dev/null; then
                 _log PASS "Podman socket is active."
                 return 0
             fi
             _log WARN "Podman socket is not active (optional for rootless)."
             _confirm_yes "Enable Podman socket?" && {
-                _log STEP "_check_container_service: running systemctl enable --now podman.socket"
+                _log STEP "_check_service: running systemctl enable --now podman.socket"
                 $var_sudo systemctl enable --now podman.socket
                 _log PASS "Podman socket enabled."
             }
@@ -491,31 +506,41 @@ _check_container_service() {
 # DOCKER USER / GROUP  (UID/GID 2000, Docker only)
 # =============================================================================
 
-_create_runtime_group() {
+_create_group() {
+    _log STEP "_create_group: checking if group '$csm_group' (GID ${csm_gid:-2000}) exists..."
+
     local lgid=${csm_gid:-2000}
-    _log STEP "_create_runtime_group: checking if group '$csm_group' (GID $lgid) exists..."
 
     if ! getent group "$csm_group" >/dev/null 2>&1; then
-        _log STEP "_create_runtime_group: creating group..."
-        $var_sudo groupadd -g "$lgid" "$csm_group" \
-            && _log INFO "Created group '$csm_group' (GID $lgid)" \
-            || _die "Failed to create group '$csm_group'"
+        _log INFO "Group '$csm_group' does not exist"
+        if [[ "$dry_run" == 1 ]]; then
+            _log INFO "Would create group '$csm_group' with GID $lgid"
+        else
+            _log STEP "_create_group: creating group..."
+            $var_sudo groupadd -g "$lgid" "$csm_group" \
+                && _log INFO "Created group '$csm_group' (GID $lgid)" \
+                || _die "Failed to create group '$csm_group'"
+        fi
     else
         _log INFO "Group '$csm_group' (GID $lgid) already exists."
     fi
 
     # Use the actual GID (may differ if group already existed with different GID)
     csm_gid="$(getent group "$csm_group" | cut -d: -f3)"
-    _log STEP "_create_runtime_group: resolved csm_gid=$csm_gid"
+    _log STEP "_create_group: resolved csm_gid=$csm_gid"
 
     local current_user="${SUDO_USER:-$(id -un)}"
-    _log STEP "_create_runtime_group: checking if user '$current_user' is in group '$csm_group'..."
+    _log STEP "_create_group: checking if user '$current_user' is in group '$csm_group'..."
     if ! groups "$current_user" 2>/dev/null | grep -qw "$csm_group"; then
         _log WARN "User '$current_user' is not in the '$csm_group' group."
         _confirm_yes "Add '$current_user' to '$csm_group'?" && {
-            _log STEP "_create_runtime_group: running gpasswd -a $current_user $csm_group"
-            $var_sudo gpasswd -a "$current_user" "$csm_group"
-            _log INFO "User added. Log out and back in for this to take effect."
+            if [[ "$dry_run" == 1 ]]; then
+                _log INFO "Would add user '$current_user' to group '$csm_group'"
+            else
+                _log STEP "_create_group: running gpasswd -a $current_user $csm_group"
+                $var_sudo gpasswd -a "$current_user" "$csm_group"
+                _log INFO "User added. Log out and back in for this to take effect."
+            fi
         }
     else
         _log PASS "User '$current_user' is in the '$csm_group' group."
@@ -555,13 +580,31 @@ _install_file() {
     fi
 }
 
-_setup_directories() {
-    # Ensure /srv is writable or exists before trying to create /srv/stacks
-    if [[ ! -w "/srv" ]] && [[ ! -d "$csm_dir" ]]; then
-        _log ERROR "Cannot write to /srv. Are you running with sufficient privileges?"
-        return 1
+_setup_folders() {
+    # Ensure we can create directories - either /srv is writable OR csm_dir already exists
+    if [[ ! -w "/srv" && ! -d "$csm_dir" ]]; then
+        _log WARN "Cannot write to /srv and ${csm_dir} does not exist. Attempting to take ownership..."
+        if [[ "$dry_run" == 1 ]]; then
+            _log INFO "Would take ownership of /srv to create ${csm_dir}"
+        else
+            $var_sudo chown -R "${csm_uid}:${csm_gid}" /srv 2>/dev/null || true
+        fi
     fi
-    _log STEP "_setup_directories: initializing structure at ${csm_dir}"
+
+    # If csm_dir exists but has wrong ownership, fix it
+    if [[ -d "$csm_dir" ]]; then
+        local current_owner current_group
+        current_owner=$(stat -c '%U' "$csm_dir" 2>/dev/null)
+        current_group=$(stat -c '%G' "$csm_dir" 2>/dev/null)
+        if [[ "$current_owner" != "$(id -un "$csm_uid")" || "$current_group" != "$csm_group" ]]; then
+            _log INFO "Updating ownership of ${csm_dir} to ${csm_uid}:${csm_group}"
+            if [[ "$dry_run" != 1 ]]; then
+                $var_sudo chown -R "${csm_uid}:${csm_group}" "$csm_dir"
+            fi
+        fi
+    fi
+
+    _log STEP "_setup_folders: initializing structure at ${csm_dir}"
     local target_dirs=(
         "$csm_dir"
         "$csm_backups"
@@ -570,62 +613,99 @@ _setup_directories() {
         "$csm_secrets"
     )
     for dir in "${target_dirs[@]}"; do
-        _install_dir "$dir" "$mode_dirs"
+        if [[ ! -d "$dir" ]]; then
+            _log INFO "Directory '$dir' does not exist"
+            if [[ "$dry_run" == 1 ]]; then
+                _log INFO "Would create directory '$dir' (mode: $mode_dirs)"
+            else
+                _install_dir "$dir" "$mode_dirs"
+            fi
+        else
+            _log INFO "Directory '$dir' already exists"
+        fi
     done
-    _log INFO "_setup_directories: done"
+    _log INFO "_setup_folders: done"
 }
 
 _setup_files() {
     _log STEP "_setup_files: installing CSM core files..."
 
-    local compose_example="${script_dir}/example-compose.yml"
-    local compose_local="${csm_configs}/local-compose.yml"
-    local compose_swarm="${csm_configs}/swarm-compose.yml"
+    # Install csm.sh
+    if [[ -f "${script_dir}/csm.sh" ]]; then
+        if [[ "$dry_run" == 1 ]]; then
+            _log INFO "Would install csm.sh to ${csm_configs}/ (mode: $mode_exec)"
+        else
+            local option=""
+            if [[ "${force_install}" == 1 ]]; then option="--force"; fi
+            _install_file "${script_dir}/csm.sh" "${csm_configs}/" "${mode_exec}" "${option}"
+        fi
+    fi
 
-    local env_example="${script_dir}/example.env"
-    local env_local="${csm_configs}/.local.env"
-    local env_swarm="${csm_configs}/.swarm.env"
-
-    # Install the core script (already done via files_to_install)
-    _install_file "${script_dir}/csm.sh" "${csm_configs}/" "$mode_exec" --force
-
-    # Ensure csm.ini exists in configs directory (may have been copied via files_to_install)
+    # Install csm.ini if not already there
     local csm_ini_installed="${csm_configs}/csm.ini"
     if [[ ! -f "$csm_ini_installed" ]]; then
         if [[ -f "${script_dir}/csm.ini" ]]; then
-            _install_file "${script_dir}/csm.ini" "${csm_configs}/" "$mode_conf"
+            if [[ "$dry_run" == 1 ]]; then
+                _log INFO "Would install csm.ini to ${csm_configs}/ (mode: $mode_conf)"
+            else
+                _install_file "${script_dir}/csm.ini" "${csm_configs}/" "$mode_conf"
+            fi
         fi
+    else
+        _log INFO "csm.ini already exists in ${csm_configs}/"
     fi
 
-    # Ensure user.conf exists for user overrides
+    # Create/ensure user.conf exists for user overrides
     local user_conf="${csm_configs}/user.conf"
     if [[ ! -f "$user_conf" || "$force_install" == 1 ]]; then
-        $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" /dev/null "$user_conf"
-        _log INFO "Initial setup: Created $user_conf for user configuration"
+        if [[ "$dry_run" == 1 ]]; then
+            _log INFO "Would create user.conf at ${csm_configs}/ (mode: $mode_conf)"
+        else
+            $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" /dev/null "$user_conf"
+            _log INFO "Created user.conf for user configuration"
+        fi
+    else
+        _log INFO "user.conf already exists"
     fi
 
     # Handle Env Templates
+    local env_example="${script_dir}/example.env"
+    local env_local="${csm_configs}/.local.env"
+    local env_swarm="${csm_configs}/.swarm.env"
     if [[ -f "$env_example" ]]; then
-        _install_file "$env_example" "${csm_configs}/" "$mode_conf"
-        if [[ ! -f "$env_local" || "$force_install" == 1 ]]; then
-            $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$env_example" "$env_local"
+        if [[ "$dry_run" == 1 ]]; then
+            _log INFO "Would install example.env to ${csm_configs}/"
+            _log INFO "Would create .local.env and .swarm.env from template"
+        else
+            _install_file "$env_example" "${csm_configs}/" "$mode_conf"
+            if [[ ! -f "$env_local" || "$force_install" == 1 ]]; then
+                $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$env_example" "$env_local"
+            fi
+            if [[ ! -f "$env_swarm" || "$force_install" == 1 ]]; then
+                $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$env_example" "$env_swarm"
+            fi
+            _log INFO "Created/Overwrote local and swarm .env templates"
         fi
-        if [[ ! -f "$env_swarm" || "$force_install" == 1 ]]; then
-            $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$env_example" "$env_swarm"
-        fi
-        _log INFO "Initial setup: Created/Overwrote local and swarm .env templates"
     fi
 
     # Handle Compose Templates
+    local compose_example="${script_dir}/example-compose.yml"
+    local compose_local="${csm_configs}/local-compose.yml"
+    local compose_swarm="${csm_configs}/swarm-compose.yml"
     if [[ -f "$compose_example" ]]; then
-        _install_file "$compose_example" "${csm_configs}/" "$mode_conf"
-        if [[ ! -f "$compose_local" || "$force_install" == 1 ]]; then
-            $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$compose_example" "$compose_local"
+        if [[ "$dry_run" == 1 ]]; then
+            _log INFO "Would install example-compose.yml to ${csm_configs}/"
+            _log INFO "Would create local-compose.yml and swarm-compose.yml from template"
+        else
+            _install_file "$compose_example" "${csm_configs}/" "$mode_conf"
+            if [[ ! -f "$compose_local" || "$force_install" == 1 ]]; then
+                $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$compose_example" "$compose_local"
+            fi
+            if [[ ! -f "$compose_swarm" || "$force_install" == 1 ]]; then
+                $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$compose_example" "$compose_swarm"
+            fi
+            _log INFO "Created/Overwrote local and swarm compose templates"
         fi
-        if [[ ! -f "$compose_swarm" || "$force_install" == 1 ]]; then
-            $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$compose_example" "$compose_swarm"
-        fi
-        _log INFO "Initial setup: Created/Overwrote local and swarm compose templates"
     fi
 
     _log INFO "_setup_files: done"
@@ -637,8 +717,13 @@ _setup_network() {
 
     # Determine binary based on detected runtime
     local cmd="$csm_runtime"
+
+    # Check for no container runtime
     if [[ -z "$cmd" ]]; then
         _log ERROR "No container runtime detected. Skipping network setup."
+        if [[ "$dry_run" == 1 ]]; then
+            _log INFO "Would skip network creation (no runtime)"
+        fi
         return 1
     fi
 
@@ -648,25 +733,39 @@ _setup_network() {
         return 0
     fi
 
+    # Network doesn't exist - create it
+    _log INFO "Network '$net_name' does not exist"
     case "$csm_runtime" in
         podman)
-            _log STEP "_setup_network: creating podman network $net_name"
-            $var_sudo podman network create "$net_name" >/dev/null 2>&1 \
-                && _log PASS "Podman network '$net_name' created." \
-                || _log WARN "Failed to create Podman network '$net_name'."
+            if [[ "$dry_run" == 1 ]]; then
+                _log INFO "Would create Podman network '$net_name'"
+            else
+                _log STEP "_setup_network: creating podman network $net_name"
+                $var_sudo podman network create "$net_name" >/dev/null 2>&1 \
+                    && _log PASS "Podman network '$net_name' created." \
+                    || _log WARN "Failed to create Podman network '$net_name'."
+            fi
             ;;
         docker)
             # Check if Swarm is active to determine network driver
             if $var_sudo docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null | grep -q "active"; then
-                _log STEP "_setup_network: creating docker swarm overlay network $net_name"
-                $var_sudo docker network create --driver overlay --attachable "$net_name" >/dev/null 2>&1 \
-                    && _log PASS "Docker Swarm network '$net_name' created." \
-                    || _log WARN "Failed to create Docker Swarm network '$net_name'."
+                if [[ "$dry_run" == 1 ]]; then
+                    _log INFO "Would create Docker Swarm overlay network '$net_name'"
+                else
+                    _log STEP "_setup_network: creating docker swarm overlay network $net_name"
+                    $var_sudo docker network create --driver overlay --attachable "$net_name" >/dev/null 2>&1 \
+                        && _log PASS "Docker Swarm network '$net_name' created." \
+                        || _log WARN "Failed to create Docker Swarm network '$net_name'."
+                fi
             else
-                _log STEP "_setup_network: creating docker bridge network $net_name"
-                $var_sudo docker network create "$net_name" >/dev/null 2>&1 \
-                    && _log PASS "Docker network '$net_name' created." \
-                    || _log WARN "Failed to create Docker network '$net_name'."
+                if [[ "$dry_run" == 1 ]]; then
+                    _log INFO "Would create Docker bridge network '$net_name'"
+                else
+                    _log STEP "_setup_network: creating docker bridge network $net_name"
+                    $var_sudo docker network create "$net_name" >/dev/null 2>&1 \
+                        && _log PASS "Docker network '$net_name' created." \
+                        || _log WARN "Failed to create Docker network '$net_name'."
+                fi
             fi
             ;;
         *)
@@ -689,13 +788,24 @@ _setup_symlinks() {
     if [[ -L "$link_source" ]]; then
         # Use -f to resolve absolute paths for comparison
         if [[ "$(readlink -f "$link_source")" != "$(readlink -f "$link_target")" ]]; then
-            _log WARN "Symlink $link_source is misaligned. Correcting..."
-            rm -f "$link_source"
-            ln -s "$link_target" "$link_source"
+            _log WARN "Symlink $link_source is misaligned."
+            if [[ "$dry_run" == 1 ]]; then
+                _log INFO "Would correct symlink: $link_source -> $link_target"
+            else
+                rm -f "$link_source"
+                ln -s "$link_target" "$link_source"
+                _log INFO "Corrected symlink: $link_source"
+            fi
+        else
+            _log INFO "Symlink $link_source is correct"
         fi
     elif [[ ! -e "$link_source" ]]; then
-        ln -s "$link_target" "$link_source"
-        _log INFO "Created symlink: $link_source"
+        if [[ "$dry_run" == 1 ]]; then
+            _log INFO "Would create symlink: $link_source -> $link_target"
+        else
+            ln -s "$link_target" "$link_source"
+            _log INFO "Created symlink: $link_source"
+        fi
     fi
 
     # Binary Link: /usr/local/bin/csm -> .configs/csm.sh
@@ -704,34 +814,64 @@ _setup_symlinks() {
 
     if [[ -L "$bin_source" ]]; then
         if [[ "$(readlink -f "$bin_source")" != "$(readlink -f "$bin_target")" ]]; then
-            _log WARN "Binary link $bin_source is misaligned. Correcting..."
-            $var_sudo ln -sf "$bin_target" "$bin_source"
+            _log WARN "Binary symlink $bin_source is misaligned."
+            if [[ "$dry_run" == 1 ]]; then
+                _log INFO "Would correct symlink: $bin_source -> $bin_target"
+            else
+                $var_sudo ln -sf "$bin_target" "$bin_source"
+                _log INFO "Corrected binary symlink: $bin_source"
+            fi
+        else
+            _log INFO "Binary symlink $bin_source is correct"
         fi
     elif [[ ! -e "$bin_source" ]]; then
-        $var_sudo ln -sf "$bin_target" "$bin_source"
-        _log INFO "Created binary symlink: $bin_source"
+        if [[ "$dry_run" == 1 ]]; then
+            _log INFO "Would create symlink: $bin_source -> $bin_target"
+        else
+            $var_sudo ln -sf "$bin_target" "$bin_source"
+            _log INFO "Created binary symlink: $bin_source"
+        fi
     fi
 }
 
-_set_ownership() {
-    _log STEP "_set_ownership: setting group on ${csm_dir} to ${csm_group}..."
+_verify_ownership() {
+    _log STEP "_verify_ownership: checking current ownership of ${csm_dir}..."
+
     local current_group
     current_group="$(_get_group "$csm_dir")"
-    _log STEP "_set_ownership: current group=$current_group, target=$csm_group"
-    [ "$current_group" != "$csm_group" ] && {
-        _log STEP "_set_ownership: running chgrp $csm_group $csm_dir"
-        $var_sudo chgrp "$csm_group" "$csm_dir"
-    }
+    _log INFO "Current group: $current_group, target: $csm_group"
+
+    if [[ "$current_group" != "$csm_group" ]]; then
+        _log INFO "Group needs to be changed"
+        if [[ "$dry_run" == 1 ]]; then
+            _log INFO "Would run: chgrp $csm_group $csm_dir"
+        else
+            _log STEP "_verify_ownership: running chgrp $csm_group $csm_dir"
+            $var_sudo chgrp "$csm_group" "$csm_dir"
+        fi
+    else
+        _log INFO "Group ownership is already correct"
+    fi
+
     local current_perms
     current_perms="$(_get_perms "$csm_dir")"
     local sgid_bit
     sgid_bit="$(echo "$current_perms" | cut -c6)"
-    _log STEP "_set_ownership: current perms=$current_perms, sgid bit=$sgid_bit"
-    [ "$sgid_bit" != "s" ] && {
-        _log STEP "_set_ownership: running chmod g+s $csm_dir"
-        $var_sudo chmod g+s "$csm_dir"
-    }
-    _log INFO "_set_ownership: done"
+    _log INFO "Current perms: $current_perms, sgid bit: $sgid_bit"
+
+    if [[ "$sgid_bit" != "s" ]]; then
+        _log INFO "SGID bit needs to be set"
+        if [[ "$dry_run" == 1 ]]; then
+            _log INFO "Would run: chmod g+s $csm_dir"
+        else
+            _log STEP "_verify_ownership: running chmod g+s $csm_dir"
+            $var_sudo chmod g+s "$csm_dir"
+        fi
+    else
+        _log INFO "SGID bit is already set"
+    fi
+
+    _log INFO "_verify_ownership: done"
 }
 
 # =============================================================================
@@ -747,26 +887,54 @@ _uninstall_csm() {
 
     # Remove Symlinks
     if [[ -L "$bin_link" ]]; then
-        _log STEP "Removing binary symlink: $bin_link"
-        $var_sudo rm -f "$bin_link"
+        if [[ "$dry_run" == 1 ]]; then
+            _log INFO "Would remove binary symlink: $bin_link"
+        else
+            _log STEP "Removing binary symlink: $bin_link"
+            $var_sudo rm -f "$bin_link"
+        fi
+    else
+        _log INFO "Binary symlink $bin_link does not exist"
     fi
+
     if [[ -L "$csm_link" ]]; then
-        _log STEP "Removing home directory symlink: $csm_link"
-        rm -f "$csm_link"
+        if [[ "$dry_run" == 1 ]]; then
+            _log INFO "Would remove home symlink: $csm_link"
+        else
+            _log STEP "Removing home directory symlink: $csm_link"
+            rm -f "$csm_link"
+        fi
+    else
+        _log INFO "Home symlink $csm_link does not exist"
     fi
 
     # Remove Core Engine Files
     if [[ -f "${csm_configs}/csm.sh" ]]; then
-        _log STEP "Removing core script: ${csm_configs}/csm.sh"
-        $var_sudo rm -f "${csm_configs}/csm.sh"
-    fi
-    if [[ -f "${csm_configs}/csm.ini" ]]; then
-        _log STEP "Removing default config: ${csm_configs}/csm.ini"
-        $var_sudo rm -f "${csm_configs}/csm.ini"
+        if [[ "$dry_run" == 1 ]]; then
+            _log INFO "Would remove: ${csm_configs}/csm.sh"
+        else
+            _log STEP "Removing core script: ${csm_configs}/csm.sh"
+            $var_sudo rm -f "${csm_configs}/csm.sh"
+        fi
+    else
+        _log INFO "File ${csm_configs}/csm.sh does not exist"
     fi
 
-    _log PASS "CSM core files and symlinks have been removed."
-    _log INFO "Note: The container runtime, groups, and ${csm_dir} directories remain intact."
+    if [[ -f "${csm_configs}/csm.ini" ]]; then
+        if [[ "$dry_run" == 1 ]]; then
+            _log INFO "Would remove: ${csm_configs}/csm.ini"
+        else
+            _log STEP "Removing default config: ${csm_configs}/csm.ini"
+            $var_sudo rm -f "${csm_configs}/csm.ini"
+        fi
+    else
+        _log INFO "File ${csm_configs}/csm.ini does not exist"
+    fi
+
+    if [[ "$dry_run" != 1 ]]; then
+        _log PASS "CSM core files and symlinks have been removed."
+        _log INFO "Note: The container runtime, groups, and ${csm_dir} directories remain intact."
+    fi
     exit 0
 }
 
@@ -781,10 +949,18 @@ ${bld}Container Stack Manager (CSM) Installer v${CSM_VERSION}${rst}
 ${bld}Usage:${rst} ${script_dir}/csm-install.sh [options]
 
 ${bld}Options:${rst}
-    -f | --force        over-writes script and config files without confirmation.
+    -b | --debug        Enable debug output.
+    -d | --dry-run      Dry run mode: show what would be done without making changes.
+    -f | --force        Overwrite script and config files without confirmation.
     -h | --help         Show this help message.
     -u | --uninstall    Uninstall all CSM scripts and unmodified config files.
     -V | --version      Show installer version.
+
+${bld}Examples:${rst}
+    ${script_dir}/csm-install.sh -f          # Force install, skip prompts
+    ${script_dir}/csm-install.sh -d          # Dry run to see what would happen
+    ${script_dir}/csm-install.sh -fdx        # Force install, dry-run, debug
+    ${script_dir}/csm-install.sh --uninstall # Uninstall CSM
 
 ${bld}Container Stack Manager Installer version:${rst} ${ylw}${CSM_VERSION}${rst}
 EOF
@@ -796,18 +972,50 @@ EOF
 
 main() {
     _color_setup
-    _vars_setup
-    # Parse arguments
-    while [[ $# -gt 0 ]]; do
-        case "${1:-}" in
-            # -d | --dryrun)      dry_run=1; csm_debug=1; shift ;; # TODO: implement dry run feature
-            -f | --force)       force_install=1; shift ;;
-            -h | --help )       show_help; exit 0 ;;
-            -u | --uninstall)   uninstall_mode=1; shift ;;
-            -V | --version)     _log PASS "Container Stack Manager Installer, csm-install.sh version: ${CSM_VERSION}"; exit 0 ;;
-            *) _log WARN "Unknown argument: $1 \n Use './csm-install.sh help' to view supported options." >&2; exit 1 ;;
+
+    # Parse arguments - support both short (-f) and long (--force) options
+    local opts
+    opts=$(getopt -o bdfhuV -l debug,dry-run,force,help,uninstall,version -n "$0" -- "$@") || {
+        show_help
+        exit 1
+    }
+    eval set -- "$opts"
+
+    while true; do
+        case "$1" in
+            -b|--debug)
+                csm_debug=1
+                shift
+                ;;
+            -d|--dry-run)
+                dry_run=1
+                _log INFO "DRY RUN MODE: No changes will be made."
+                shift
+                ;;
+            -f|--force)
+                force_install=1
+                shift
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -u|--uninstall)
+                uninstall_mode=1
+                shift
+                ;;
+            -V|--version)
+                _log PASS "Container Stack Manager version: ${CSM_VERSION}"
+                exit 0
+                ;;
+            --)
+                shift
+                break
+                ;;
         esac
     done
+
+    _vars_setup
 
     # Handle uninstallation
     if [[ "$uninstall_mode" == 1 ]]; then
@@ -821,29 +1029,21 @@ main() {
     fi
 
     # Interactive config prompt (skip if force_install is set)
-    _interactive_config_prompt
+    _user_input
 
     _log INFO "Install root: ${csm_dir}"
     _log INFO "Invoking user: ${csm_owner} (UID ${csm_uid})"
 
-    _log STEP "main: detecting package manager..."
+    # Run installation steps
     _detect_pkg_manager
-    _log STEP "main: detecting/installing container runtime..."
-    _install_container_runtime
-    _log STEP "main: checking container service..."
-    _check_container_service
-    _log STEP "main: creating runtime group..."
-    _create_runtime_group
-    _log STEP "main: setting up network..."
+    _create_group
+    _install_runtime
+    _check_service
     _setup_network
-    _log STEP "main: setting up directories..."
-    _setup_directories
-    _log STEP "main: installing files..."
+    _setup_folders
     _setup_files
-    _log STEP "main: setting up symlinks..."
     _setup_symlinks
-    _log STEP "main: setting ownership..."
-    _set_ownership
+    _verify_ownership
 
     echo ""
     _log PASS "CSM installation complete!"
