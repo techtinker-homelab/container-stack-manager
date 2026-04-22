@@ -242,16 +242,18 @@ _vars_setup() {
 
     # Load defaults from csm.ini
     source "$csm_ini_file"
+    _log INFO "Loaded defaults from $csm_ini_file"
 
     # Store all CSM_* values in associative array for unified handling
     declare -gA csm_values
-    for var in "${!csm_var_order[@]}"; do
+    for var in "${csm_var_order[@]}"; do
         local val=""
         if [[ -v "$var" ]]; then
             val="${!var}"
         fi
         csm_values[$var]="$val"
     done
+    _log INFO "Loaded ${#csm_values[@]} config values from csm.ini"
 
     # User overrides (populated in _user_input, written to user.conf in _setup_files)
 
