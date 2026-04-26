@@ -29,7 +29,7 @@
 #   │  ├── .swarm.env               ← Docker Swarm specific variables
 #   │  ├── example.env              ← bare bones example .env variables
 #   │  └── <variable_name>.secret   ← one secret file per secret variable
-#   ├── .modules/
+#   ├── .templates/
 #   │  └── <stack>/                 ← descriptive name of the stack
 #   │     ├── compose.yml           ← pre-made compose.yml tailored to work with CSM
 #   │     └── example.env           ← variables required for this specific compose.yml
@@ -129,8 +129,16 @@ _check_permissions() {
 
     local owner group perms; read -r owner group perms <<< "$info"
 
-    # Safe if owned by current user or root AND not world-writable (last digit < 2)
+    # Safe if owned by current user or root AND not world-accessible (last digit < 2)
     if [[ "$owner" == "$USER" || "$owner" == "root" ]] && [[ "${perms: -1}" < "2" ]]; then
+        # Recurse on subdirectories
+        for sub in "$dir"/*/; do
+            if [[ -d "$sub" ]]; then
+                if ! _check_permissions "${sub%/}"; then
+                    return 1
+                fi
+            fi
+        done
         return 0
     fi
     return 1
@@ -234,7 +242,7 @@ _check_prereqs() {
 
     # Check stacks directory permissions
     if ! _check_permissions "$csm_dir"; then
-        _log EXIT "Stacks directory '$csm_dir' has unsafe permissions. Fix with: chown $USER:$USER '$csm_dir' && chmod 755 '$csm_dir'"
+        _log EXIT "Stacks directory '$csm_dir' has unsafe permissions. Fix with: chown $USER:$USER '$csm_dir' && chmod 770 '$csm_dir'"
     fi
     _log STEP "Stacks directory permissions are safe"
 
@@ -397,7 +405,7 @@ _setup_variables() {
     csm_backups="${CSM_BACKUPS_DIR:-${csm_dir}/.backups}"
     csm_configs="${CSM_CONFIGS_DIR:-${csm_dir}/.configs}"
     csm_secrets="${CSM_SECRETS_DIR:-${csm_dir}/.secrets}"
-    csm_modules="${CSM_MODULES_DIR:-${csm_dir}/.modules}"
+    csm_templates="${CSM_TEMPLATES_DIR:-${csm_dir}/.templates}"
 
     # Assign operation varaibles with defaults
     csm_gid="${CSM_STACKS_GID:-$(_get_gid "${csm_cmd:-docker}")}"
@@ -1320,7 +1328,7 @@ manage_config() {
                 "csm_dir:"       "$csm_dir"   \
                 "csm_backups:"   "$csm_backups"  \
                 "csm_configs:"   "$csm_configs"  \
-                "csm_modules:"   "$csm_modules"  \
+                "csm_templates:"   "$csm_templates"  \
                 "csm_secrets:"   "$csm_secrets"  \
             ;;
         edit)
@@ -1345,30 +1353,30 @@ manage_config() {
 # TEMPLATE MANAGEMENT (public, stub)
 # =============================================================================
 
-manage_module() {
-    _log WARN "The 'modules' command is not yet implemented."
-    _log WARN "When released, it will list available modules from"
+manage_template() {
+    _log WARN "The 'templates' command is not yet implemented."
+    _log WARN "When released, it will list available templates from"
     _log WARN "https://codeberg.com/techtinker/homelab and allow you to"
-    _log WARN "download and run a module to install an app stack."
+    _log WARN "download and run a template to install an app stack."
 
-    ##TODO: possible start to module management function code
+    ##TODO: possible start to template management function code
     # local action="${1:-list}"
     # shift || true
     # case "$action" in
     #     list)
-    #         local tdir="${csm_modules}"
-    #         if [[ ! -d "$tdir" ]]; then log WARN "No modules directory: $tdir"; return 0; fi
-    #         log INFO "Available modules:"
+    #         local tdir="${csm_templates}"
+    #         if [[ ! -d "$tdir" ]]; then log WARN "No templates directory: $tdir"; return 0; fi
+    #         log INFO "Available templates:"
     #         find "$tdir" -mindepth 1 -maxdepth 1 -type d | sort | \
     #             while IFS= read -r t; do
     #                 printf "  %s%s%s\n" "${cyn}" "$(basename "$t")" "${rst}"
     #             done
     #         ;;
     #     add|remove|update)
-    #         log WARN "module $action: not yet implemented."
+    #         log WARN "template $action: not yet implemented."
     #         ;;
     #     *)
-    #         log FAIL "Unknown module action: $action  (use: list | add | remove | update)"
+    #         log FAIL "Unknown template action: $action  (use: list | add | remove | update)"
     #         return 1
     #         ;;
     # esac
@@ -1441,7 +1449,7 @@ ${bld}Information:${rst}
     cd            <stack>       Print the stack directory path
     ps                          List all containers (formatted, colorized)
     net           [action]      Network info: host | inspect [name] | list
-    m  | module                 Module management (not yet implemented)
+    t  | template [action]      Template management (not yet implemented)
 
 ${bld}Configuration:${rst}
     cfg | config (show|edit|reload)  Display, edit, or reload CSM configs
@@ -1510,7 +1518,7 @@ main() {
         ps)             stack_ps             ;;
         net)            net_info        "$@" ;;
         cfg|config)     manage_config   "$@" ;;
-        m|module)       manage_module   "$@" ;;
+        t|template)     manage_template "$@" ;;
         secret)         secret          "$@" ;;
         *) _log FAIL "Unknown command: '$cmd'"; show_help; exit 1 ;;
     esac
