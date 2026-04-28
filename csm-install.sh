@@ -140,11 +140,21 @@ _confirm_yes() {
 _confirm_no() {
     if [[ "$force_install" == 1 ]]; then return 0; fi
     local prompt="${1:-Are you sure?}"
-    read -r -p "${prompt} [y/N]: " reply
-    case "${reply,,}" in
-        y|yes) return 0 ;;
-        *) return 1 ;;
-    esac
+    read -r -p "${ylw}${bld}  ${prompt} [y/N]: ${rst}" reply
+    if [[ "${reply,,}" == "y" ]]; then return 0; fi
+    return 1 # Explicitly return 1
+}
+
+_sanitize_input() {
+    local input="$1"
+    # Remove dangerous characters that could enable code execution or break sed
+    input="${input//\$/}"    # Remove dollar signs
+    input="${input//\(/}"    # Remove parentheses
+    input="${input//\)/}"
+    input="${input//\`/}"    # Remove backticks
+    input="${input//|/}"     # Remove pipes (sed delimiter)
+    input="${input//\\/}"    # Remove backslashes
+    echo "$input"
 }
 
 _parse_value() {
@@ -405,7 +415,7 @@ _user_input() {
                 CSM_CONTAINER_RUNTIME) default_val="$csm_runtime" ;;
                 CSM_STACKS_UID) default_val="$csm_uid" ;;
             esac
-            sed -i "s|^${var}=.*$|${var}=${default_val}|" "$user_conf"
+            sed -i "s|^${var}=.*$|${var}=\"${default_val}\"|" "$user_conf"
             user_overrides[$var]="$default_val"
         done
         _log STEP "All values reset to defaults"
@@ -427,7 +437,8 @@ _user_input() {
                 esac
             fi
             if [[ -n "$new" ]]; then
-                sed -i "s|^${var}=.*$|${var}=${new}|" "$user_conf"
+                new="$(_sanitize_input "$new")"
+                sed -i "s|^${var}=.*$|${var}=\"${new}\"|" "$user_conf"
                 user_overrides[$var]="$new"
                 _log STEP "Set ${var}=${new}"
                 updated=$((updated + 1))
@@ -470,6 +481,15 @@ _install_pkg() {
             _log STEP "_install_pkg: running pacman -S --noconfirm $*"
             $var_sudo pacman -S --noconfirm "$@" ;;
     esac
+}
+
+_get_file_info() {
+    local file="${1:-}"
+    local info=""
+    # Try GNU stat first (Linux), fallback to BSD stat
+    if info=$(stat -c '%U %G %a' "$file" 2>/dev/null) || info=$(stat -f '%Su %Sg %Lp' "$file" 2>/dev/null); then
+        echo "$info"
+    fi
 }
 
 _get_group() {
@@ -523,29 +543,17 @@ _install_podman() {
 }
 
 _install_runtime() {
-    _log STEP "_install_runtime: checking for existing runtime..."
     if _detect_runtime; then
         _log INFO "Container runtime already installed - skipping installation."
         return 0
     fi
 
-    _log WARN "No container runtime found."
-    _log INFO "Which would you like to install?"
-    _log INFO "  1) Docker  (recommended for most users)"
-    _log INFO "  2) Podman  (daemonless, rootless by default)"
-
-    local choice=""
-    read -r -p "${ylw}${bld} Select [1/2]: ${rst}" choice
-    _log STEP "_install_runtime: user choice=$choice"
-    case "$choice" in
-        1|docker) _install_docker ;;
-        2|podman) _install_podman ;;
-        "")       _install_docker ;;
-        *)        _die "Invalid choice. Aborting." ;;
+    local runtime="${1:-docker}"
+    case "$runtime" in
+        docker) _install_docker ;;
+        podman) _install_podman ;;
+        *) _log EXIT "Unsupported runtime: $runtime" ;;
     esac
-    if [[ "$csm_runtime" == "docker" ]]; then
-        _configure_swarm
-    fi
 }
 
 _detect_swarm() {
@@ -703,8 +711,12 @@ _install_dir() {
     local tgt="${1:-}" mode="${2:-}"
     if [[ ! -d "$tgt" ]]; then
         _log STEP "_install_dir: creating $tgt (mode=$mode)"
-        $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -d "$tgt"
-        _log INFO "Created: $tgt"
+        if [[ "$dry_run" == 1 ]]; then
+            _log INFO "Would create directory '$tgt' (mode=$mode)"
+        else
+            $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -d "$tgt"
+            _log INFO "Created: $tgt"
+        fi
     fi
 }
 
@@ -729,50 +741,26 @@ _install_file() {
 }
 
 _setup_folders() {
-    # Ensure we can create directories - either /srv is writable OR csm_dir already exists
-    if [[ ! -w "/srv" && ! -d "$csm_dir" ]]; then
-        _log WARN "Cannot write to /srv and ${csm_dir} does not exist. Attempting to take ownership..."
-        if [[ "$dry_run" == 1 ]]; then
-            _log INFO "Would take ownership of /srv to create ${csm_dir}"
-        else
-            $var_sudo chown -R "${csm_uid}:${csm_gid}" /srv 2>/dev/null || true
-        fi
-    fi
-
-    # If csm_dir exists but has wrong ownership, fix it
-    if [[ -d "$csm_dir" ]]; then
-        local current_owner current_group
-        current_owner=$(stat -c '%U' "$csm_dir" 2>/dev/null)
-        current_group=$(stat -c '%G' "$csm_dir" 2>/dev/null)
-        if [[ "$current_owner" != "$(id -un "$csm_uid")" || "$current_group" != "$csm_group" ]]; then
-            _log INFO "Updating ownership of ${csm_dir} to ${csm_uid}:${csm_group}"
-            if [[ "$dry_run" != 1 ]]; then
-                $var_sudo chown -R "${csm_uid}:${csm_group}" "$csm_dir"
-            fi
-        fi
-    fi
-
-    _log STEP "_setup_folders: initializing structure at ${csm_dir}"
+    _log STEP "_setup_folders: initializing structure at ${CSM_ROOT_DIR}"
     local target_dirs=(
-        "$csm_dir"
-        "$csm_backups"
-        "$csm_configs"
-        "$csm_secrets"
-        "$csm_templates"
+        "${CSM_ROOT_DIR}"
+        "${CSM_BACKUPS_DIR}"
+        "${CSM_CONFIGS_DIR}"
+        "${CSM_SECRETS_DIR}"
+        "${CSM_TEMPLATES_DIR}"
     )
     for dir in "${target_dirs[@]}"; do
-        if [[ ! -d "$dir" ]]; then
-            if [[ "$dry_run" == 1 ]]; then
-                _log INFO "Would create directory '$dir' (mode: $mode_dirs)"
-            else
-                _install_dir "$dir" "$mode_dirs"
-                _log INFO "Created directory: $dir"
-            fi
-        else
-            _log INFO "Directory '$dir' already exists"
-        fi
+        _install_dir "$dir" "770"
     done
-    _log INFO "_setup_folders: done"
+
+    # Set secrets directory to more restrictive permissions
+    if [[ -d "$CSM_SECRETS_DIR" ]]; then
+        if [[ "$dry_run" == 1 ]]; then
+            _log INFO "Would set secrets directory to mode 700"
+        else
+            $var_sudo chmod 700 "$CSM_SECRETS_DIR"
+        fi
+    fi
 }
 
 _setup_files() {
@@ -961,59 +949,36 @@ _setup_network() {
 # =============================================================================
 
 _setup_symlinks() {
-    _log STEP "_setup_symlinks: setting up symlinks..."
+    local links=(
+        "${HOME}/stacks:${CSM_ROOT_DIR}"
+        "/usr/local/bin/csm:${CSM_CONFIGS_DIR}/csm.sh"
+    )
 
-    # Convenience Link: ~/stacks -> CSM_ROOT_DIR
-    local link_source="$csm_link"
-    local link_target="$csm_dir"
+    for link_spec in "${links[@]}"; do
+        local source="${link_spec%:*}" target="${link_spec#*:}"
 
-    if [[ -L "$link_source" ]]; then
-        # Use -f to resolve absolute paths for comparison
-        if [[ "$(readlink -f "$link_source")" != "$(readlink -f "$link_target")" ]]; then
-            _log WARN "Symlink $link_source is misaligned."
-            if [[ "$dry_run" == 1 ]]; then
-                _log INFO "Would correct symlink: $link_source -> $link_target"
+        if [[ -L "$source" ]]; then
+            if [[ "$(readlink -f "$source")" != "$(readlink -f "$target")" ]]; then
+                _log WARN "Symlink $source is misaligned."
+                if [[ "$dry_run" == 1 ]]; then
+                    _log INFO "Would correct symlink: $source -> $target"
+                else
+                    [[ "$source" == /usr/local/bin/* ]] && $var_sudo rm -f "$source" || rm -f "$source"
+                    [[ "$source" == /usr/local/bin/* ]] && $var_sudo ln -sf "$target" "$source" || ln -sf "$target" "$source"
+                    _log INFO "Corrected symlink: $source"
+                fi
             else
-                rm -f "$link_source"
-                ln -s "$link_target" "$link_source"
-                _log INFO "Corrected symlink: $link_source"
+                _log INFO "Symlink $source is correct"
             fi
-        else
-            _log INFO "Symlink $link_source is correct"
-        fi
-    elif [[ ! -e "$link_source" ]]; then
-        if [[ "$dry_run" == 1 ]]; then
-            _log INFO "Would create symlink: $link_source -> $link_target"
-        else
-            ln -s "$link_target" "$link_source"
-            _log INFO "Created symlink: $link_source"
-        fi
-    fi
-
-    # Binary Link: /usr/local/bin/csm -> .configs/csm.sh
-    local bin_source="$bin_link"
-    local bin_target="${csm_configs}/csm.sh"
-
-    if [[ -L "$bin_source" ]]; then
-        if [[ "$(readlink -f "$bin_source")" != "$(readlink -f "$bin_target")" ]]; then
-            _log WARN "Binary symlink $bin_source is misaligned."
+        elif [[ ! -e "$source" ]]; then
             if [[ "$dry_run" == 1 ]]; then
-                _log INFO "Would correct symlink: $bin_source -> $bin_target"
+                _log INFO "Would create symlink: $source -> $target"
             else
-                $var_sudo ln -sf "$bin_target" "$bin_source"
-                _log INFO "Corrected binary symlink: $bin_source"
+                [[ "$source" == /usr/local/bin/* ]] && $var_sudo ln -sf "$target" "$source" || ln -sf "$target" "$source"
+                _log INFO "Created symlink: $source"
             fi
-        else
-            _log INFO "Binary symlink $bin_source is correct"
         fi
-    elif [[ ! -e "$bin_source" ]]; then
-        if [[ "$dry_run" == 1 ]]; then
-            _log INFO "Would create symlink: $bin_source -> $bin_target"
-        else
-            $var_sudo ln -sf "$bin_target" "$bin_source"
-            _log INFO "Created binary symlink: $bin_source"
-        fi
-    fi
+    done
 }
 
 _verify_ownership() {
