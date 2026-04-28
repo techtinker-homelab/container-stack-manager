@@ -616,44 +616,77 @@ _configure_swarm() {
 
 _check_service() {
     _log STEP "_check_service: runtime=$csm_runtime"
+
+    # 1. Detect Init System
+    local init_type="unknown"
+    if [[ -d /run/systemd/system ]]; then
+        init_type="systemd"
+    elif [[ -x /sbin/openrc-run ]] || [[ -f /etc/init.d/functions.sh ]]; then
+        # OpenRC (Common on Devuan/Alpine)
+        init_type="openrc"
+    elif [[ -f /etc/init.d/skeleton ]] || [[ -d /etc/init.d ]]; then
+        # Traditional SysVinit
+        init_type="sysvinit"
+    fi
+
+    # 2. Define Internal Helper for status/start
+    # Usage: _srv_manager <service_name> <action: status|start>
+    _srv_manager() {
+        local srv="$1"
+        local action="$2"
+
+        case "$init_type" in
+            systemd)
+                [[ "$action" == "status" ]] && systemctl is-active --quiet "$srv" && return 0
+                [[ "$action" == "start" ]] && $var_sudo systemctl start "$srv" && return 0
+                ;;
+            openrc)
+                [[ "$action" == "status" ]] && rc-service "$srv" status >/dev/null 2>&1 && return 0
+                [[ "$action" == "start" ]] && $var_sudo rc-service "$srv" start && return 0
+                ;;
+            sysvinit)
+                [[ "$action" == "status" ]] && service "$srv" status >/dev/null 2>&1 && return 0
+                [[ "$action" == "start" ]] && $var_sudo service "$srv" start && return 0
+                ;;
+            *)
+                _log WARN "Unknown init system. Manual check required for $srv."
+                return 0 # Assume okay to prevent script death
+                ;;
+        esac
+        return 1
+    }
+
+    # 3. Runtime Logic
     case "$csm_runtime" in
         docker)
-            _log STEP "Checking Docker service..."
-            if ! command -v systemctl >/dev/null 2>&1; then
-                _log WARN "systemctl not found - skipping service check."
-                return 0
-            fi
-            _log STEP "_check_service: checking systemctl is-active docker"
-            if systemctl is-active --quiet docker; then
+            _log STEP "Checking Docker service via $init_type..."
+            if _srv_manager docker status; then
                 _log PASS "Docker service is running."
                 return 0
             fi
+
             _log WARN "Docker service is not running."
-            _confirm_yes "Start Docker now?" && {
-                _log STEP "_check_service: running systemctl start docker"
-                $var_sudo systemctl start docker
-                systemctl is-active --quiet docker \
+            if _confirm_yes "Start Docker now?"; then
+                _srv_manager docker start \
                     && _log PASS "Docker started." \
-                    || _die "Failed to start Docker. Check: journalctl -u docker"
-            }
+                    || _die "Failed to start Docker. Check logs in /var/log/."
+            fi
             ;;
         podman)
-            _log STEP "Checking Podman socket..."
-            if ! command -v systemctl >/dev/null 2>&1; then
-                _log WARN "systemctl not found - skipping service check."
-                return 0
+            # Podman socket logic varies wildly outside systemd
+            if [[ "$init_type" == "systemd" ]]; then
+                _log STEP "Checking Podman socket (systemd)..."
+                if _srv_manager podman.socket status; then
+                    _log PASS "Podman socket is active."
+                    return 0
+                fi
+                _confirm_yes "Enable Podman socket?" && {
+                    $var_sudo systemctl enable --now podman.socket
+                    _log PASS "Podman socket enabled."
+                }
+            else
+                _log INFO "Podman socket management is manual on $init_type."
             fi
-            _log STEP "_check_service: checking systemctl is-active podman.socket"
-            if systemctl is-active --quiet podman.socket 2>/dev/null; then
-                _log PASS "Podman socket is active."
-                return 0
-            fi
-            _log WARN "Podman socket is not active (optional for rootless)."
-            _confirm_yes "Enable Podman socket?" && {
-                _log STEP "_check_service: running systemctl enable --now podman.socket"
-                $var_sudo systemctl enable --now podman.socket
-                _log PASS "Podman socket enabled."
-            }
             ;;
     esac
 }
