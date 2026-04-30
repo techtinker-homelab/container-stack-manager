@@ -518,11 +518,14 @@ stack_rename() {
     new_name="${2:-}"
     new_dir="$(_get_stack_dir "$new_name")"
 
-    if [[ -d "$old_dir" ]]
-    if [[ -d "$new_dir" ]]; then _log EXIT "Stack '$new_name' already exists at $new_dir"; fi
-
-    mv "$old_dir" "$new_dir"
-    _log PASS "Stack '$old_name' renamed to '$new_name'."
+    if [[ -d "$new_dir" ]]; then
+        _log EXIT "Stack '$new_name' already exists at $new_dir"
+        return 1
+    fi
+    if [[ -d "$old_dir" ]]; then
+        mv "$old_dir" "$new_dir"
+        _log PASS "Stack '$old_name' renamed to '$new_name'."
+    fi
 }
 
 stack_edit() {
