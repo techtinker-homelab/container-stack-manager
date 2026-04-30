@@ -97,12 +97,8 @@ _log() {
     if [[ "$level" == "EXIT" ]]; then exit 1; fi
 }
 
-_detect_os() {    # Detect OS tools for user/group lookups
-    if command -v dscl >/dev/null 2>&1; then
-        use_dscl=1
-    elif command -v getent >/dev/null 2>&1; then
-        use_getent=1
-    fi
+_detect_os() {
+    os_type=$(uname -s)
 }
 
 _get_file_info() {
@@ -121,17 +117,18 @@ _get_gid() {
     group_name="${1:-}"
     gid=""
 
-    # macOS/BSD with dscl
-    if [[ $use_dscl ]]; then
-        gid=$(dscl . -read /Groups/"$group_name" PrimaryGroupID 2>/dev/null | awk '{print $2}')
-    # Linux with getent
-    elif [[ $use_getent ]]; then
-        gid=$(getent group "$group_name" | cut -d: -f3)
-    fi
+    case $os_type in
+        Darwin|*BSD)
+            gid=$(dscl . -read /Groups/"$group_name" PrimaryGroupID 2>/dev/null | awk '{print $2}')
+            ;;
+        Linux)
+            gid=$(getent group "$group_name" | cut -d: -f3)
+            ;;
+    esac
 
     # Fallback: try to get from current user's groups
     if [[ -z "$gid" ]]; then
-        gid=$(id -G "$USER" 2>/dev/null | tr ' ' '\n' | grep -w "$(id -gn "$USER" 2>/dev/null || echo "$group")" | head -1)
+        gid=$(id -G "$USER" 2>/dev/null | tr ' ' '\n' | grep -w "$(id -gn "$USER" 2>/dev/null || echo "$group_name")" | head -1)
     fi
 
     echo "$gid"
@@ -142,13 +139,14 @@ _get_group() {
     gid="${1:-}"
     group_name=""
 
-    # macOS/BSD with dscl
-    if [[ $use_dscl ]]; then
-        group_name=$(dscl . -search /Groups PrimaryGroupID "$gid" 2>/dev/null | head -1 | cut -d: -f1)
-    # Linux with getent
-    elif [[ $use_getent ]]; then
-        group_name=$(getent group "$gid" | cut -d: -f1)
-    fi
+    case $os_type in
+        Darwin|*BSD)
+            group_name=$(dscl . -search /Groups PrimaryGroupID "$gid" 2>/dev/null | head -1 | cut -d: -f1)
+            ;;
+        Linux)
+            group_name=$(getent group "$gid" | cut -d: -f1)
+            ;;
+    esac
 
     # Fallback: use id command
     if [[ -z "$group_name" ]]; then
@@ -164,13 +162,14 @@ _get_uid() {
     user_name="${1:-$USER}"
     uid=""
 
-    # macOS/BSD with dscl
-    if [[ $use_dscl ]]; then
-        uid=$(dscl . -read /Users/"$user_name" UniqueID 2>/dev/null | awk '{print $2}')
-    # Linux with getent
-    elif [[ $use_getent ]]; then
-        uid=$(getent passwd "$user_name" | cut -d: -f3)
-    fi
+    case $os_type in
+        Darwin|*BSD)
+            uid=$(dscl . -read /Users/"$user_name" UniqueID 2>/dev/null | awk '{print $2}')
+            ;;
+        Linux)
+            uid=$(getent passwd "$user_name" | cut -d: -f3)
+            ;;
+    esac
 
     # Fallback: use id command (POSIX, works everywhere)
     if [[ -z "$uid" ]]; then
@@ -185,13 +184,14 @@ _get_owner() {
     uid="${1:-}"
     user_name=""
 
-    # macOS/BSD with dscl
-    if [[ $use_dscl ]]; then
-        user_name=$(dscl . -search /Users UniqueID "$uid" 2>/dev/null | head -1 | cut -d: -f1)
-    # Linux with getent
-    elif [[ $use_getent ]]; then
-        user_name=$(getent passwd "$uid" | cut -d: -f1)
-    fi
+    case $os_type in
+        Darwin|*BSD)
+            user_name=$(dscl . -search /Users UniqueID "$uid" 2>/dev/null | head -1 | cut -d: -f1)
+            ;;
+        Linux)
+            user_name=$(getent passwd "$uid" | cut -d: -f1)
+            ;;
+    esac
 
     # Fallback: use id command
     if [[ -z "$user_name" ]]; then

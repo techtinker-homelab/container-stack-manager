@@ -78,6 +78,30 @@ else
 fi
 
 # =============================================================================
+# REQUIRED SETUP VARIABLE VALUES
+# =============================================================================
+
+# NOTE: Change these to work on your intended container host
+
+# local dirs_list=(
+#     "${CSM_ROOT_DIR}"
+#     "${CSM_BACKUPS_DIR}"
+#     "${CSM_CONFIGS_DIR}"
+#     "${CSM_SECRETS_DIR}"
+#     "${CSM_TEMPLATES_DIR}"
+# )
+
+# local file_list=(
+#     "${CSM_CONFIGS_DIR}/csm.sh"
+#     "${CSM_CONFIGS_DIR}/csm.ini"
+#     "${CSM_CONFIGS_DIR}/local.env"
+#     "${CSM_CONFIGS_DIR}/local.yml"
+#     "${CSM_CONFIGS_DIR}/swarm.env"
+#     "${CSM_CONFIGS_DIR}/swarm.yml"
+#     "${CSM_CONFIGS_DIR}/user.conf"
+# )
+
+# =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
 
@@ -126,6 +150,10 @@ _log() {
 }
 
 _die() { _log FAIL "$1"; exit 1; }
+
+_detect_os() {
+    os_type=$(uname -s)
+}
 
 _confirm_yes() {
     if [[ "$force_install" == 1 ]]; then return 0; fi
@@ -699,22 +727,36 @@ _create_group() {
 
     local lgid=${csm_gid:-2000}
 
-    if ! getent group "$csm_group" >/dev/null 2>&1; then
-        _log INFO "Group '$csm_group' does not exist"
-        if [[ "$dry_run" == 1 ]]; then
-            _log INFO "Would create group '$csm_group' with GID $lgid"
-        else
-            _log STEP "_create_group: creating group..."
-            $var_sudo groupadd -g "$lgid" "$csm_group" \
-                && _log INFO "Created group '$csm_group' (GID $lgid)" \
-                || _die "Failed to create group '$csm_group'"
-        fi
+    if [[ "$dry_run" == 1 ]]; then
+        _log INFO "Would create group '$csm_group' with GID $lgid"
     else
-        _log INFO "Group '$csm_group' (GID $lgid) already exists."
+        case $os_type in
+            Darwin|*BSD)
+                if ! dscl . -read /Groups/"$csm_group" >/dev/null 2>&1; then
+                    _log INFO "Group '$csm_group' does not exist"
+                    $var_sudo dscl . -create /Groups/"$csm_group" \
+                        && $var_sudo dscl . -create /Groups/"$csm_group" PrimaryGroupID "$lgid" \
+                        && _log INFO "Created group '$csm_group' (GID $lgid)" \
+                        || _die "Failed to create group '$csm_group'"
+                else
+                    _log INFO "Group '$csm_group' (GID $lgid) already exists."
+                fi
+                csm_gid=$(dscl . -read /Groups/"$csm_group" PrimaryGroupID 2>/dev/null | awk '{print $2}')
+                ;;
+            Linux)
+                if ! getent group "$csm_group" >/dev/null 2>&1; then
+                    _log INFO "Group '$csm_group' does not exist"
+                    $var_sudo groupadd -g "$lgid" "$csm_group" \
+                        && _log INFO "Created group '$csm_group' (GID $lgid)" \
+                        || _die "Failed to create group '$csm_group'"
+                else
+                    _log INFO "Group '$csm_group' (GID $lgid) already exists."
+                fi
+                csm_gid="$(getent group "$csm_group" | cut -d: -f3)"
+                ;;
+            *) _die "Unsupported OS: $os_type" ;;
+        esac
     fi
-
-    # Use the actual GID (may differ if group already existed with different GID)
-    csm_gid="$(getent group "$csm_group" | cut -d: -f3)"
     _log STEP "_create_group: resolved csm_gid=$csm_gid"
 
     local current_user="${SUDO_USER:-$(id -un)}"
@@ -1179,6 +1221,7 @@ EOF
 
 main() {
     _color_setup
+    _detect_os
 
     # Parse arguments - support both short (-f) and long (--force) options
     local opts
