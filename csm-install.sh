@@ -348,7 +348,6 @@ _vars_setup() {
     readonly bin_link="/usr/local/bin/csm"
 
     # Permission modes (move to csm.ini if configurable, else keep here)
-    readonly mode_dirs="770"
     readonly mode_exec="770"
     readonly mode_conf="660"
     readonly mode_auth="600"
@@ -544,7 +543,7 @@ _install_podman() {
 
 _install_runtime() {
     if _detect_runtime; then
-        _log INFO "Container runtime already installed - skipping installation."
+        _log INFO "Container runtime already installed."
         return 0
     fi
 
@@ -761,10 +760,11 @@ _install_file() {
         _log STEP "_install_file: installing $filename (mode=$mode)"
         case "$flag" in
             -f | --force)
+                # Overwrite target file, -p: preserve timestamps
                 $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -p "$src" "$dest_dir/"
                 ;;
             *)
-                # -v: verbose, -C: only copy if different, -p: preserve timestamps
+                # Only copy if changed, -C: only copy if different
                 $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -C "$src" "$dest_dir/"
         esac
         _log INFO "Installed: $filename → $dest_dir"
@@ -783,7 +783,7 @@ _setup_folders() {
         "${CSM_TEMPLATES_DIR}"
     )
     for dir in "${target_dirs[@]}"; do
-        _install_dir "$dir" "770"
+        _install_dir "$dir" "$mode_exec"
     done
 
     # Set secrets directory to more restrictive permissions
@@ -791,7 +791,7 @@ _setup_folders() {
         if [[ "$dry_run" == 1 ]]; then
             _log INFO "Would set secrets directory to mode 700"
         else
-            $var_sudo chmod 700 "$CSM_SECRETS_DIR"
+            $var_sudo chmod $mode_auth "$CSM_SECRETS_DIR"
         fi
     fi
 }
@@ -820,8 +820,6 @@ _setup_files() {
                 _install_file "${script_dir}/csm.ini" "${csm_configs}/" "$mode_conf"
             fi
         fi
-    else
-        _log INFO "csm.ini already exists in ${csm_configs}/"
     fi
 
     # # Create/ensure user.conf exists for user overrides
@@ -910,8 +908,6 @@ _setup_files() {
             _log INFO "Created/Overwrote local and swarm compose templates"
         fi
     fi
-
-    _log INFO "_setup_files: done"
 }
 
 _setup_network() {
@@ -932,7 +928,7 @@ _setup_network() {
 
     # Check if the network already exists
     if $var_sudo "$cmd" network inspect "$net_name" >/dev/null 2>&1; then
-        _log INFO "Network '$net_name' already exists."
+        _log PASS "Custom network '$net_name' exists."
         return 0
     fi
 
@@ -982,6 +978,7 @@ _setup_network() {
 # =============================================================================
 
 _setup_symlinks() {
+    _log STEP "_setup_symlinks: checking and creating symlinks"
     local links=(
         "${HOME}/stacks:${CSM_ROOT_DIR}"
         "/usr/local/bin/csm:${CSM_CONFIGS_DIR}/csm.sh"
@@ -1000,8 +997,6 @@ _setup_symlinks() {
                     [[ "$source" == /usr/local/bin/* ]] && $var_sudo ln -sf "$target" "$source" || ln -sf "$target" "$source"
                     _log INFO "Corrected symlink: $source"
                 fi
-            else
-                _log INFO "Symlink $source is correct"
             fi
         elif [[ ! -e "$source" ]]; then
             if [[ "$dry_run" == 1 ]]; then
@@ -1016,42 +1011,34 @@ _setup_symlinks() {
 
 _verify_ownership() {
     _log STEP "_verify_ownership: checking current ownership of ${csm_dir}..."
+    local current_group current_perms owner
 
-    local current_group
-    current_group="$(_get_group "$csm_dir")"
+    read -r owner current_group <<< "$(_get_file_info "$csm_dir")"
     _log INFO "Current group: $current_group, target: $csm_group"
 
     if [[ "$current_group" != "$csm_group" ]]; then
-        _log INFO "Group needs to be changed"
         if [[ "$dry_run" == 1 ]]; then
             _log INFO "Would run: chgrp $csm_group $csm_dir"
         else
             _log STEP "_verify_ownership: running chgrp $csm_group $csm_dir"
             $var_sudo chgrp "$csm_group" "$csm_dir"
         fi
-    else
-        _log INFO "Group ownership is already correct"
     fi
 
-    local current_perms
     current_perms="$(_get_perms "$csm_dir")"
-    local sgid_bit
-    sgid_bit="$(echo "$current_perms" | cut -c6)"
-    _log INFO "Current perms: $current_perms, sgid bit: $sgid_bit"
-
-    if [[ "$sgid_bit" != "s" ]]; then
-        _log INFO "SGID bit needs to be set"
+    if [[ "$current_perms" != "drwxrws---" ]]; then
         if [[ "$dry_run" == 1 ]]; then
-            _log INFO "Would run: chmod g+s $csm_dir"
+            _log INFO "Would run: chmod $mode_exec $csm_dir && chmod g+s $csm_dir"
         else
-            _log STEP "_verify_ownership: running chmod g+s $csm_dir"
-            $var_sudo chmod g+s "$csm_dir"
+            if $var_sudo chmod $mode_exec "$csm_dir" && $var_sudo chmod g+s "$csm_dir"; then
+                _log STEP "_verify_ownership: set permissions to $mode_exec with setgid on $csm_dir"
+            else
+                _log WARN "Failed to set permissions on $csm_dir"
+            fi
         fi
-    else
-        _log INFO "SGID bit is already set"
     fi
 
-    _log INFO "_verify_ownership: done"
+    _log INFO "Current perms: $(_get_perms "$csm_dir")"
 }
 
 # =============================================================================
@@ -1059,7 +1046,7 @@ _verify_ownership() {
 # =============================================================================
 
 _uninstall_csm() {
-    _log WARN "Starting CSM uninstallation..."
+    _log WARN "Starting CSM ${red}un${ylw}installation..."
     _log INFO "This will remove the core script and symlinks."
     if [[ "$force_uninstall" == 0 ]]; then
         _log INFO "Your stacks, user.conf, and templates will NOT be modified."
