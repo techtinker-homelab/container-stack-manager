@@ -911,13 +911,11 @@ stack_info() {
     stack_name="${2:-}"
     lines="${3:-50}"
 
-
-    file="$(_require_compose "$stack_name")"
-    _detect_scope "$stack_name"
-
     case "$action" in
         ps|status) stack_ps "$stack_name" ;;
         verify)
+            file="$(_require_compose "$stack_name")"
+            _detect_scope "$stack_name"
             case "$scope" in
                 local) _compose_config $file ;;
                 swarm)
@@ -929,8 +927,12 @@ stack_info() {
                     ;;
             esac
             ;;
-        inspect) "$csm_cmd" compose -f "$file" config ;;
+        inspect)
+            file="$(_require_compose "$stack_name")"
+            "$csm_cmd" compose -f "$file" config ;;
         logs)
+            file="$(_require_compose "$stack_name")"
+            _detect_scope "$stack_name"
             case "$scope" in
                 local) "$csm_cmd" compose -f "$file" logs -f --tail="$lines" ;;
                 swarm) docker service logs --tail "$lines" -f "$stack_name" ;;
@@ -1241,14 +1243,14 @@ ${bld}Stack Operations:${rst}
     ud | update   <stack>        Pull latest images then redeploy
 
 ${bld}Information:${rst}
-    s  | status   <stack>       Show container/service status for a stack
-    v  | validate <stack>       Validate compose.yml syntax
-    i  | inspect  <stack>       Inspect stack configuration
     g  | logs     <stack> [n]   Follow logs (default: last 50 lines)
+    i  | inspect  <stack>       Inspect stack configuration
     l  | ls | list              List all stacks with running state and scope
+    s  | status   <stack>       Show container/service status for a stack
     ps            [stack]       List all containers (formatted, colorized)
     net           [action]      Network info: host | inspect [name] | list
     t  | template [action]      Template management (not yet implemented)
+    v  | verify   <stack>       Validate compose.yml syntax
 
 ${bld}Configuration:${rst}
     cfg | config (show|edit|reload)  Display, edit, or reload CSM configs
@@ -1257,9 +1259,9 @@ ${bld}Secrets:${rst}
     secret [ls|rm] <name>       Create, list, or remove Docker secrets (swarm required)
 
 ${bld}Options:${rst}
-    a | -a | --aliases          Print shell aliases to eval in your shell rc
-    h | -h | --help             Show this help
-    v | -v | --version          Show version
+    -a | --aliases          Print shell aliases to eval in your shell rc
+    -h | --help             Show this help
+    -v | --version          Show version
 
 ${bld}Container Stack Manager (csm.sh) version:${rst} ${ylw}${csm_version}${rst}
 EOF
@@ -1279,38 +1281,38 @@ main() {
     shift || true
 
     case "$cmd" in
-        a | -a | --aliases)         _print_aliases; exit 0 ;;
-        h | -h | --help | help)     show_help; exit 0 ;;
-        v | -v | --version)         echo "CSM v${csm_version}"; exit 0 ;;
+        -a | --aliases)         _print_aliases; exit 0 ;;
+        -h | --help | help)     show_help; exit 0 ;;
+        -v | --version)         echo "CSM v${csm_version}"; exit 0 ;;
     esac
 
     case "$cmd" in
-        c|create|n|new) stack_create            "$@" ;;
-        e|edit)         stack_edit              "$@" ;;
-        r|rename)       stack_rename            "$@" ;;
-        bu|backup)      stack_backup            "$@" ;;
-        dt|delete)      stack_delete            "$@" ;;
-        ls|list)        stack_list                   ;;
-        rc|recreate)    stack_recreate          "$@" ;;
-        xx|purge)       stack_purge             "$@" ;;
+        c|create|n|new)     stack_create            "$@" ;;
+        e|edit)             stack_edit              "$@" ;;
+        r|rename)           stack_rename            "$@" ;;
+        bu|backup)          stack_backup            "$@" ;;
+        dt|delete)          stack_delete            "$@" ;;
+        ls|list)            stack_list                   ;;
+        rc|recreate)        stack_recreate          "$@" ;;
+        xx|purge)           stack_purge             "$@" ;;
 
-        b|bounce)       stack_ops "bounce"      "$@" ;;
-        u|up)           stack_ops "up"          "$@" ;;
-        d|dn|down)      stack_ops "down"        "$@" ;;
-        rs|restart)     stack_ops "restart"     "$@" ;;
-        sp|stop)        stack_ops "stop"        "$@" ;;
-        st|start)       stack_ops "start"       "$@" ;;
-        ud|update)      stack_ops "update"      "$@" ;;
+        b|bounce)           stack_ops "bounce"      "$@" ;;
+        u|up)               stack_ops "up"          "$@" ;;
+        d|dn|down)          stack_ops "down"        "$@" ;;
+        rs|restart)         stack_ops "restart"     "$@" ;;
+        sp|stop)            stack_ops "stop"        "$@" ;;
+        st|start)           stack_ops "start"       "$@" ;;
+        ud|update)          stack_ops "update"      "$@" ;;
 
-        i|inspect)      stack_info "inspect"    "$@" ;;
-        s|ps|status)    stack_info "status"     "$@" ;;
-        v|verify)       stack_info "verify"     "$@" ;;
-        g|logs)         stack_info "logs"       "$@" ;;
+        i|inspect)          stack_info "inspect"    "$@" ;;
+        s|ps|status)        stack_info "status"     "$@" ;;
+        v|verify|validate)  stack_info "verify"     "$@" ;;
+        g|logs)             stack_info "logs"       "$@" ;;
 
-        net)            net_info                "$@" ;;
-        cfg|config)     manage_config           "$@" ;;
-        t|template)     manage_template         "$@" ;;
-        secret)         secret                  "$@" ;;
+        net)                net_info                "$@" ;;
+        cfg|config)         manage_config           "$@" ;;
+        t|template)         manage_template         "$@" ;;
+        secret)             secret                  "$@" ;;
         *) _log FAIL "Unknown command: '$cmd'"; show_help; exit 1 ;;
     esac
 }
