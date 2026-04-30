@@ -45,7 +45,7 @@ set -euo pipefail
 # =============================================================================
 readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
-csm_debug="0" # set to "1" to display debug step messages
+csm_debug="1" # set to "1" to display debug step messages
 csm_cmd=""    # set by _detect_command
 scope=""      # set by _detect_scope
 
@@ -211,20 +211,18 @@ _check_prereqs() {
     if [[ -z "$csm_cmd" ]]; then
         _log EXIT "No container runtime found. Please install Docker or Podman first."
     fi
-    _log STEP "Container runtime detected: $csm_cmd"
 
     # Check stacks directory permissions
     if ! _validate_permissions "$csm_dir"; then
         _log EXIT "Stacks directory '$csm_dir' has unsafe permissions. Fix with: chown $USER:$USER '$csm_dir' && chmod 770 '$csm_dir'"
     fi
-    _log STEP "Stacks directory permissions are safe"
 
     # Check container group and set csm_gid
     csm_gid=$(_get_gid "$csm_group")
     if [[ -z "$csm_gid" ]]; then
         _log EXIT "Container group '$csm_group' not found or GID cannot be determined. Please run the installer to create the group."
     fi
-    _log STEP "Container group '$csm_group' found with GID: $csm_gid"
+    _log STEP "_check_prereqs: csm_group=$csm_group csm_gid=$csm_gid"
 
     # Set csm_uid with fallback
     csm_uid="${SUDO_UID:-$(id -u "$USER" 2>/dev/null || id -u)}"
@@ -243,7 +241,7 @@ _confirm_yes() {
 
 _confirm_no() {
     local prompt="${1:-Are you sure?}"
-    read -r -p "${ylw}${bld}  ${prompt} [y/N]: ${rst}" reply
+    read -r -p "${red}${bld} ${prompt} [y/N]: ${rst}" reply
     if [[ "${reply,,}" == "y" ]]; then return 0; fi
     return 1 # Explicitly return 1
 }
@@ -253,7 +251,6 @@ _confirm_no() {
 # =============================================================================
 
 _detect_command() {
-    _log STEP "_detect_command: checking for docker compose..."
     if docker compose version >/dev/null 2>&1; then
         csm_cmd="docker"
         _log STEP "_detect_command: using docker"
@@ -268,7 +265,6 @@ _detect_command() {
 }
 
 _detect_swarm() {
-    _log STEP "_detect_swarm: csm_cmd=$csm_cmd"
     _check_cmd
     if [[ "$csm_cmd" == "podman" ]]; then
         _log STEP "_detect_swarm: podman detected, skipping"
@@ -399,10 +395,6 @@ _validate_permissions() {
     fi
 }
 
-# =============================================================================
-# INTERNAL HELPERS
-# =============================================================================
-
 _require_name() {
     if [[ ! -n "${1:-}" ]]; then _log EXIT "Stack name is required."; fi
     _log STEP "_require_name: ${1:-}"
@@ -433,14 +425,13 @@ _fix_permissions() {
 }
 
 _stack_validate() {
-    local stack_name stack_dir stack_name_val stack_dir_val
+    local stack_name stack_dir
     stack_name="$(_require_name "${1:-}")"
     stack_dir="$(_get_stack_dir "$stack_name")"
-    read -r stack_name_val stack_dir_val <<< "$("$stack_dir" "$stack_dir")"
     if [[ ! -d "$stack_dir" ]]; then
         _log EXIT "Stack '$stack_name' not found at $stack_dir"
     fi
-    echo "$stack_name_val $stack_dir_val"
+    echo "$stack_name $stack_dir"
 }
 
 # =============================================================================
@@ -462,7 +453,7 @@ stack_create() {
         target_scope="swarm"
     fi
 
-    local temp_compose="$csm_configs/${target_scope}-compose.yml"
+    local temp_compose="$csm_configs/${target_scope}.yml"
     local temp_env="$csm_configs/.${target_scope}.env"
 
     _log STEP "stack_create: name=$stack_name, dir=$stack_dir, scope=$target_scope"
@@ -559,103 +550,69 @@ stack_backup() {
     fi
 }
 
-stack_remove() {
-    local stack_name stack_dir force
-    stack_name="$(_require_name "${1:-}")"
-    stack_dir="$(_get_stack_dir "$stack_name")"
-    force="${3:-}"
-    _log STEP "stack_remove: name=$stack_name, dir=$stack_dir"
-    _check_cmd
+stack_recreate() {
+    local stack_name stack_dir
+    read -r stack_name stack_dir <<< "$(_stack_validate "${1:-}")"
 
-    if [[ ! -d "$stack_dir" ]]; then _log EXIT "Stack '$stack_name' not found at $stack_dir"; fi
-    if [[ "$stack_dir" == "/" || "$stack_dir" == "$csm_dir" ]]; then
-        _log EXIT "Safety guard: refusing to delete $stack_dir"
-    fi
+    _log WARN "This will delete the current stack directory and create a clean stack with the same name."
+    if ! _confirm_no "Confirm RECREATE for '$stack_name'?"; then _log INFO "Cancelled."; return 0; fi
 
-    if ! _confirm_no "Remove stack '$stack_name'? (all running stack containers will be removed)"; then
-        _log INFO "Cancelled."
-        return 0
-    fi
-
-    if [[ -f "${stack_dir}/compose.yml" ]]; then
-        _detect_scope "$stack_name"
-        case "$scope" in
-            swarm)
-                docker stack rm "$stack_name" 2>/dev/null || true ;;
-            local)
-                if [[ "$force" == "force" ]]; then
-                    local containers
-                    containers="$("$csm_cmd" compose -f "${stack_dir}/compose.yml" ps -q 2>/dev/null)" || true
-                    if [[ -n "$containers" ]]; then
-                        "$csm_cmd" compose -f "${stack_dir}/compose.yml" rm --stop --force
-                    fi
-                else
-                    "$csm_cmd" compose -f "${stack_dir}/compose.yml" down 2>/dev/null || true
-                fi
-                ;;
-        esac
-    fi
-
-    # rm -rf "$stack_dir"
-    _log PASS "Stack '$stack_name' deleted."
+    stack_delete "$stack_name" "force"
+    stack_create "$stack_name"
 }
 
 stack_delete() {
     local stack_name stack_dir
     read -r stack_name stack_dir <<< "$(_stack_validate "${1:-}")"
 
-    _log WARN "This will PERMANENTLY delete '$stack_name' and ALL associated appdata."
-    if ! _confirm_no "Confirm DELETE of $stack_dir?"; then _log INFO "Cancelled."; return 0; fi
+    _log WARN "This will remove containers, BACKUP the stack, then PERMANENTLY DELETE '$stack_name' and ALL data."
+    if ! _confirm_no "Confirm DELETE of ${cyn}$stack_dir${red} (with backup)?"; then
+    _log INFO "Delete operation cancelled."; return 0; fi
 
-    stack_remove "$stack_name" "$stack_dir" "force"
-}
-
-stack_recreate() {
-    local stack_name stack_dir
-    read -r stack_name stack_dir <<< "$(_stack_validate "${1:-}")"
-
-    _log WARN "This will destroy the current stack directory and create a fresh one."
-    if ! _confirm_no "Confirm RECREATE for '$stack_name'?"; then _log INFO "Cancelled."; return 0; fi
-
-    stack_remove "$stack_name" "$stack_dir" "force"
-    stack_create "$stack_name"
+    stack_ops "down" "$stack_name"
+    stack_backup "$stack_name"
+        rm -rf "$stack_dir"
+    _log PASS "Stack '$stack_name' backed up and deleted."
 }
 
 stack_purge() {
     local target_stacks=("$@")
+    local backups_deleted=false
 
-    if [[ ${#target_stacks[@]} -eq 0 ]]; then
-        _log WARN "No stacks specified. Gathering ALL stacks for purge."
-        if ! _confirm_no "Are you sure you want to iterate through ALL stacks?"; then
-            _log INFO "Cancelled."
-            return 0
-        fi
-        while IFS= read -r -d '' d; do
-            target_stacks+=("$(basename "$d")")
-        done < <(find "$csm_dir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print0)
-    fi
+    # Iterate through stacksdir and add all stacks to purge list (disabled, but keep code)
+    # if [[ ${#target_stacks[@]} -eq 0 ]]; then
+    #     _log WARN "No stacks specified. Gathering ${mgn}ALL${ylw} stacks for purge."
+    #     if ! _confirm_no "Are you sure you want to iterate through ${ylw}ALL${red} stacks?"; then
+    #         _log INFO "Cancelled."
+    #         return 0
+    #     fi
+    #     while IFS= read -r -d '' d; do
+    #         target_stacks+=("$(basename "$d")")
+    #     done < <(find "$csm_dir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print0)
+    # fi
 
     for stack in "${target_stacks[@]}"; do
         local d; d="$(_get_stack_dir "$stack")"
         if [[ ! -d "$d" ]]; then continue; fi
 
-        if ! _confirm_no "Permanently delete stack '$stack'?"; then
+        stack_ops "down" "$stack"
+        if _confirm_no "Permanently delete '${cyn}$stack${red}' folder and ${ylw}ALL${red} associated data?"; then
+            rm -rf "$d"
+        else
             _log INFO "Skipping $stack."
             continue
         fi
 
-        if _confirm_yes "Backup '$stack' before deletion?"; then
-            stack_backup "$stack"
+        # Nuclear option - delete backups
+        if [[ -d "$csm_backups/$stack" ]] \
+            && _confirm_no "Also DELETE ${ylw}ALL${red} ${cyn}$stack${red} BACKUPS in ${blu}$csm_backups/$stack${red}? This is ${mgn}IRREVERSIBLE${red}!"
+        then
+            rm -rf "$csm_backups/$stack"
+            backups_deleted=true
+            _log PASS "All ${cyn}$stack${grn} backups deleted."
         fi
-
-        if _confirm_no "Final check: DESTROY '$stack'?"; then
-            stack_remove "$stack"
-        else
-            _log INFO "Skipped $stack at the final step."
-        fi
+        _log PASS "Stack '${cyn}$stack${grn}' purged."
     done
-
-    _log PASS "Purge operations complete."
 }
 
 # =============================================================================
@@ -945,51 +902,6 @@ secret_list() {
 # INFORMATION (public)
 # =============================================================================
 
-_get_swarm_stacks() {
-    docker stack ls --format '{{.Name}}' 2>/dev/null | sort
-}
-
-_get_stack_status() {
-    local stack_name status_label status_color
-    stack_name="$1"
-
-    _detect_scope "$stack_name"
-
-    case "$scope" in
-        swarm)
-            if _get_swarm_stacks | grep -qw "$stack_name"; then
-                status_color="${grn}"; status_label="deployed"
-            else
-                status_color="${ylw}"; status_label="stopped"
-            fi
-            ;;
-        *)
-            local stack_dir="$(_get_stack_dir "$stack_name")"
-            if "$csm_cmd" compose -f "${stack_dir}/compose.yml" ps --services --filter status=running 2>/dev/null | grep -q .; then
-                status_color="${grn}"; status_label="running"
-            else
-                status_color="${ylw}"; status_label="stopped"
-            fi
-            ;;
-    esac
-    echo "$scope" "$status_label" "$status_color"
-}
-
-_verify_compose () {
-    local file="${1}"
-    if "$csm_cmd" compose -f "$file" config -q 2>&1; then
-        _log PASS "Config valid: $file"
-    else
-        _log EXIT "Config invalid: $file"
-    fi
-}
-_format_tabular_data() {
-    local header="$1"
-    local data_command="$2"
-    printf "%s%s%s\n" "${bld}" "$header" "${rst}"
-    eval "$data_command" | column -ts $'\t'
-}
-
 stack_info() {
     local action="$1"
     local stack_name="${2:-}"
@@ -1035,6 +947,51 @@ stack_info() {
             ;;
         *) _log EXIT "Unknown info operation: $action" ;;
     esac
+}
+
+_get_swarm_stacks() {
+    docker stack ls --format '{{.Name}}' 2>/dev/null | sort
+}
+
+_get_stack_status() {
+    local stack_name status_label status_color
+    stack_name="$1"
+
+    _detect_scope "$stack_name"
+
+    case "$scope" in
+        swarm)
+            if _get_swarm_stacks | grep -qw "$stack_name"; then
+                status_color="${grn}"; status_label="deployed"
+            else
+                status_color="${ylw}"; status_label="stopped"
+            fi
+            ;;
+        *)
+            local stack_dir="$(_get_stack_dir "$stack_name")"
+            if "$csm_cmd" compose -f "${stack_dir}/compose.yml" ps --services --filter status=running 2>/dev/null | grep -q .; then
+                status_color="${grn}"; status_label="running"
+            else
+                status_color="${ylw}"; status_label="stopped"
+            fi
+            ;;
+    esac
+    echo "$scope" "$status_label" "$status_color"
+}
+
+_verify_compose () {
+    local file="${1}"
+    if "$csm_cmd" compose -f "$file" config -q 2>&1; then
+        _log PASS "Config valid: $file"
+    else
+        _log EXIT "Config invalid: $file"
+    fi
+}
+
+_format_tabular_data() {
+    local header="$1"
+    local data_command="$2"
+    { printf "%s%s%s\n" "${bld}" "$header" "${rst}"; eval "$data_command"; } | column -ts $'\t'
 }
 
 stack_list() {
@@ -1088,10 +1045,9 @@ stack_list() {
 
 stack_ps() {
     local stack_name="${1:-}"
-    _log STEP "stack_ps: listing containers${stack_name:+ for $stack_name}"
+    _log STEP "stack_ps: listing containers ${stack_name:+ for $stack_name}"
     _check_cmd
     local swarm_active=false
-    _detect_swarm && swarm_active=true
     _log STEP "stack_ps: swarm_active=$swarm_active"
 
     if [[ -n "$stack_name" ]]; then
@@ -1103,6 +1059,7 @@ stack_ps() {
                 "$csm_cmd" compose -f "$file" ps
                 ;;
             swarm)
+                _detect_swarm && swarm_active=true
                 docker stack ps "$stack_name"
                 ;;
         esac
@@ -1110,7 +1067,7 @@ stack_ps() {
     fi
 
     # All containers
-    _format_tabular_data "CONTAINER ID\tNAME\tSTATUS\tPORTS" \
+    _format_tabular_data "CONTAINER ID"$'\t'"NAME"$'\t'"STATUS"$'\t'"PORTS" \
         '"$csm_cmd" ps --all --format "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}" | sort -k2,2 | sed -E "
             s/^([^ \t]+)\t([^ \t]+)\t([^ \t]+)\t(.+)/\1\t${cyn}\2${rst}\t\3\t\4/
             s/0\.0\.0\.0://g; s/\[::\]://g; s/->.*\/\w+//g; s/, //g
@@ -1149,21 +1106,6 @@ stack_ps() {
     fi
 }
 
-
-stack_cd() {
-    local stack_name; stack_name="$(_require_name "${1:-}")"
-    local stack_dir; stack_dir="$(_get_stack_dir "$stack_name")"
-    _log STEP "stack_cd: name=$stack_name, dir=$stack_dir"
-    _check_cmd
-    if [[ ! -d "$stack_dir" ]]; then _log EXIT "Stack '$stack_name' not found at $stack_dir"; fi
-    echo "$stack_dir"
-}
-
-_net_list() {
-    _log STEP "_net_list: listing networks"
-    _format_tabular_data "NAME\tDRIVER\tSCOPE\tID" '"$csm_cmd" network ls --format "{{.Name}}\t{{.Driver}}\t{{.Scope}}\t{{.ID}}" | sort'
-}
-
 net_info() {
     local action="${1:-list}"
     local target="${2:-${csm_net_name}}"
@@ -1173,24 +1115,19 @@ net_info() {
 
     case "$action" in
         h|host)
-            _log STEP "net_info: detecting host IP"
             printf "Host IP : %s\n" \
                 "$(curl -fsSL ifconfig.me 2>/dev/null || echo 'unavailable')"
             ;;
         i|inspect)
-            _log STEP "net_info: inspecting network $target"
             "$csm_cmd" network inspect "$target"
             ;;
+        l|ls|list|"")
+            _format_tabular_data "NAME"$'\t'"DRIVER"$'\t'"SCOPE"$'\t'"ID" '"$csm_cmd" network ls --format "{{.Name}}\t{{.Driver}}\t{{.Scope}}\t{{.ID}}" | sort'
+            ;;
         *)
-            # also handles: l|ls|list
-            _net_list
-
-            # If the action wasn't empty/list, it was a typo
-            if [[ "$action" != "list" ]]; then
-                _log WARN "Unknown net action: $action"
+                _log FAIL "Unknown net action: $action"
                 _log INFO "Available: h|host, i|inspect [name], l|ls|list"
                 return 1
-            fi
             ;;
     esac
 }
@@ -1214,22 +1151,21 @@ manage_config() {
                 "csm_dir:"       "$csm_dir"   \
                 "csm_backups:"   "$csm_backups"  \
                 "csm_configs:"   "$csm_configs"  \
-                "csm_templates:"   "$csm_templates"  \
+                "csm_templates:" "$csm_templates"  \
                 "csm_secrets:"   "$csm_secrets"  \
             ;;
         edit)
             local ucfg="${csm_configs}/user.conf"
-            _log STEP "manage_config: editing $ucfg"
             if [[ ! -f "$ucfg" ]]; then mkdir -p "$csm_configs"; touch "$ucfg"; fi
             "${EDITOR:-vi}" "$ucfg"
             ;;
         reload)
-            _log STEP "manage_config: reloading config..."
             _setup_variables
             _log PASS "Configuration reloaded."
             ;;
         *)
-            _log FAIL "Unknown config action: $action  (use: show | edit | reload)"
+            _log FAIL "Unknown config action: $action"
+            _log INFO "Usage: csm config [show|edit|reload]"
             return 1
             ;;
     esac
@@ -1273,24 +1209,22 @@ manage_template() {
 # =============================================================================
 
 _print_aliases() {
-    _log STEP "_print_aliases: "
+    _log STEP "_print_aliases: genssh, ctupdate, cds"
     cat <<ALIAS
 # Container Stack Manager — shell helpers
 # Source this in your shell rc:  eval "\$(csm --aliases)"
 
 # Check host and container IPs
 hostip() { echo "Host IP: \$(curl -fsSL ifconfig.me 2>/dev/null || wget -qO- ifconfig.me)"; }
-lancheck() { echo "Container IP: \$(${csm_cmd} container exec -it "\${*}" curl -fsSL ipinfo.io 2>/dev/null || wget -qO- ipinfo.io)"; }
-vpncheck() { echo "Container IP: \$(${csm_cmd} container exec -it "\${*}" curl -fsSL ipinfo.io/ip 2>/dev/null || wget -qO- ipinfo.io/ip)" && \\
+lancheck() { echo "Container IP: \$(${csm_cmd} container exec -it "\${1}" curl -fsSL ipinfo.io 2>/dev/null || wget -qO- ipinfo.io)"; }
+vpncheck() { echo "Container IP: \$(${csm_cmd} container exec -it "\${1}" curl -fsSL ipinfo.io/ip 2>/dev/null || wget -qO- ipinfo.io/ip)" && \\
             echo "     Host IP: \$(curl -fsSL ifconfig.me 2>/dev/null || wget -qO- ifconfig.me)"; }
-
 # Create encryption key
-keygen() { openssl rand -hex ${1:-32}; }
-ctupd() {
-    [[ -z $1 ]] || echo "Usage: dcupdate <container-name>"; return 0
-    $csm_cmd run --rm --name "$1-update" -v /var/run/$csm_cmd.sock:/var/run/$csm_cmd.sock ghcr.io/nicholas-fedor/watchtower --run-once "$1";
+genkey() { openssl rand -hex \${1:-32}; }
+ctupdate() {
+    [[ -z \$1 ]] || echo "Usage: ctupdate <container-name>"; return 0
+    $csm_cmd run --rm --name "\$1-update" -v /var/run/$csm_cmd.sock:/var/run/$csm_cmd.sock ghcr.io/nicholas-fedor/watchtower --run-once "\$1";
 }
-
 # cd into stacks directory or a specific stack
 alias cds='cd ${csm_dir}'
 ALIAS
@@ -1311,11 +1245,10 @@ ${bld}Stack Lifecycle:${rst}
     n  | new      <stack>        Alias for create
     e  | edit     <stack>        Open compose.yml in \$EDITOR
     r  | rename   <old> <new>    Rename a stack directory
-    rm | remove   <stack>        Stop and remove containers (prompts)
-    dt | delete   <stack>        Permanently delete stack + all data (prompts)
-    bu | backup   <stack>        Archive stack to .backups/ as tar.gz
     rc | recreate <stack>        Delete and recreate stack from scratch (prompts)
-    xx | purge    [stack...]     Purge one or all stacks — WARNING THIS IS FINAL
+    bu | backup   <stack>        Archive stack to .backups/ as tar.gz
+    dt | delete   <stack>        Backup, remove containers, delete stack + data
+    xx | purge    [stacks...]    Purge stacks + data (optionally nuke backups)
 
 ${bld}Stack Operations:${rst}
     u  | up       <stack>        Deploy stack (up -d --remove-orphans)
@@ -1327,13 +1260,12 @@ ${bld}Stack Operations:${rst}
     ud | update   <stack>        Pull latest images then redeploy
 
 ${bld}Information:${rst}
-    l  | list                   List all stacks with running state and scope
     s  | status   <stack>       Show container/service status for a stack
     v  | validate <stack>       Validate compose.yml syntax
     i  | inspect  <stack>       Inspect stack configuration
     g  | logs     <stack> [n]   Follow logs (default: last 50 lines)
-    cd            <stack>       Print the stack directory path
-    ps                          List all containers (formatted, colorized)
+    l  | ls | list              List all stacks with running state and scope
+    ps            [stack]       List all containers (formatted, colorized)
     net           [action]      Network info: host | inspect [name] | list
     t  | template [action]      Template management (not yet implemented)
 
@@ -1344,9 +1276,9 @@ ${bld}Secrets:${rst}
     secret [ls|rm] <name>       Create, list, or remove Docker secrets (swarm required)
 
 ${bld}Options:${rst}
-    -h | --help            Show this help
-    -V | --version         Show version
-    --aliases              Print shell aliases to eval in your shell rc
+    a | -a | --aliases          Print shell aliases to eval in your shell rc
+    h | -h | --help             Show this help
+    v | -v | --version          Show version
 
 ${bld}Container Stack Manager (csm.sh) version:${rst} ${ylw}${csm_version}${rst}
 EOF
@@ -1365,9 +1297,9 @@ main() {
     shift || true
 
     case "$cmd" in
-        -a | --aliases)         _print_aliases; exit 0 ;;
-        -h | --help | h | help) show_help; exit 0 ;;
-        -v | --version)         echo "CSM v${csm_version}"; exit 0 ;;
+        a | -a | --aliases)         _print_aliases; exit 0 ;;
+        h | -h | --help | help)     show_help; exit 0 ;;
+        v | -v | --version)         echo "CSM v${csm_version}"; exit 0 ;;
     esac
 
     _validate_config || true
@@ -1376,9 +1308,8 @@ main() {
         e|edit)         stack_edit              "$@" ;;
         r|rename)       stack_rename            "$@" ;;
         bu|backup)      stack_backup            "$@" ;;
-        dt|delete)      stack_delete            "$@" ;;
         rc|recreate)    stack_recreate          "$@" ;;
-        rm|remove)      stack_remove            "$@" ;;
+        dt|delete)      stack_delete            "$@" ;;
         xx|purge)       stack_purge             "$@" ;;
         u|up)           stack_ops "up"          "$@" ;;
         d|dn|down)      stack_ops "down"        "$@" ;;
@@ -1392,7 +1323,6 @@ main() {
         s|status)       stack_info "status"     "$@" ;;
         v|verify)       stack_info "verify"     "$@" ;;
         g|logs)         stack_info "logs"       "$@" ;;
-        cd)             stack_cd                "$@" ;;
         ps)             stack_ps                     ;;
         net)            net_info                "$@" ;;
         cfg|config)     manage_config           "$@" ;;
