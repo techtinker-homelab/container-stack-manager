@@ -102,15 +102,29 @@ _detect_os() {
 }
 
 _get_file_info() {
-    local file info
+    local file
     file="${1:-}"
-    info=""
-    # Try GNU stat first (Linux), fallback to BSD stat
-    if info=$(stat -c '%U %G %a' "$file" 2>/dev/null) || info=$(stat -f '%Su %Sg %Lp' "$file" 2>/dev/null); then
-        echo "$info"
-    fi
+    declare -gA file_info
+    case $os_type in
+        Darwin|*BSD)
+            file_info[owner]=   "$(stat -f '%Su' "$file" 2>/dev/null)"
+            file_info[uid]=     "$(stat -f '%u' "$file"  2>/dev/null)"
+            file_info[group]=   "$(stat -f '%Sg' "$file" 2>/dev/null)"
+            file_info[gid]=     "$(stat -f '%g' "$file"  2>/dev/null)"
+            file_info[perms]=   "$(stat -f '%Sp' "$file" 2>/dev/null)"
+            file_info[octal]=   "$(stat -f '%p' "$file"  2>/dev/null)"
+            ;;
+        Linux)
+            file_info[path]=    "$(stat -c '%n' "$file" 2>/dev/null)"
+            file_info[owner]=   "$(stat -c '%U' "$file" 2>/dev/null)"
+            file_info[uid]=     "$(stat -c '%u' "$file" 2>/dev/null)"
+            file_info[group]=   "$(stat -c '%G' "$file" 2>/dev/null)"
+            file_info[gid]=     "$(stat -c '%g' "$file" 2>/dev/null)"
+            file_info[perms]=   "$(stat -c '%A' "$file" 2>/dev/null)"
+            file_info[octal]=   "$(stat -c '%a' "$file" 2>/dev/null)"
+            ;;
+    esac
 }
-
 
 _get_gid() {
     local gid group_name
@@ -336,14 +350,14 @@ _ensure_perms() {
         return 1
     fi
     local mode
-    mode="$(stat -c '%A' "$target" 2>/dev/null || stat -f '%Sp' "$target" 2>/dev/null)"
+    _get_file_info "$target"
+    mode="${file_info[octal]:-}"
     if [[ -z "$mode" ]]; then
         _log WARN "Unable to get permissions for $target"
         _log WARN "Fix manually: sudo chmod 2770 \"$stack_dir\" && find \"$stack_dir\" -type f -exec chmod 660 {} \\;"
-
         return 1
     fi
-    if [[ "$mode" != "drwxrws---" ]]; then
+    if [[ "$mode" != "2770" ]]; then
         _log STEP "_ensure_perms: incorrect perms ($mode), fixing to drwxrws---"
         find "$target" -type f -exec chmod 660 {} \;
         find "$target" -type d -exec chmod 2770 {} \;
@@ -800,7 +814,7 @@ secret() {
 }
 
 _secret_validate_file() {
-    local file owner group perms;
+    local file
     file="$1"
     if [[ -L "$file" ]]; then
         _log EXIT "Refusing symlinked secret file: $file"
@@ -808,9 +822,9 @@ _secret_validate_file() {
     if [[ ! -r "$file" ]]; then
         _log EXIT "Secret file exists but is not readable: $file"
     fi
-    read -r owner group perms <<< "$(_get_file_info "$file")"
-    if [[ "$perms" != "600" ]]; then
-        _log WARN "Secret file permissions are $perms, expected 600."
+    _get_file_info "$file"
+    if [[ "${file_info[octal]:-}" != "600" ]]; then
+        _log WARN "Secret file permissions are ${file_info[octal]:-}, expected 600."
     fi
 }
 
@@ -911,11 +925,13 @@ stack_info() {
     stack_name="${2:-}"
     lines="${3:-50}"
 
+    if [[ "$action" == "status" ]]; then stack_ps "$stack_name"; return; fi
+
+    _require_name "$stack_name"
+    file="$(_require_compose "$stack_name")"
+    _detect_scope "$stack_name"
     case "$action" in
-        ps|status) stack_ps "$stack_name" ;;
         verify)
-            file="$(_require_compose "$stack_name")"
-            _detect_scope "$stack_name"
             case "$scope" in
                 local) _compose_config $file ;;
                 swarm)
@@ -928,11 +944,8 @@ stack_info() {
             esac
             ;;
         inspect)
-            file="$(_require_compose "$stack_name")"
             "$csm_cmd" compose -f "$file" config ;;
         logs)
-            file="$(_require_compose "$stack_name")"
-            _detect_scope "$stack_name"
             case "$scope" in
                 local) "$csm_cmd" compose -f "$file" logs -f --tail="$lines" ;;
                 swarm) docker service logs --tail "$lines" -f "$stack_name" ;;
