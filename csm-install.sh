@@ -40,7 +40,7 @@ fi
 # GLOBAL INSTALLATION VARIABLES, SET TO "1" VIA COMMAND OPTIONS
 # =============================================================================
 
-csm_version="0.4.5"
+csm_version="0.4.9"
 
 # Install operation flags
 dry_run=0
@@ -852,14 +852,16 @@ _setup_files() {
         fi
     fi
 
-    # Install csm.ini if not already there
+    # Install csm.ini if not already there, or force overwrite
     local csm_ini_installed="${csm_configs}/csm.ini"
-    if [[ ! -f "$csm_ini_installed" ]]; then
+    if [[ ! -f "$csm_ini_installed" || "$force_install" == 1 ]]; then
         if [[ -f "${script_dir}/csm.ini" ]]; then
             if [[ "$dry_run" == 1 ]]; then
                 _log INFO "Would install csm.ini to ${csm_configs}/ (mode: $mode_conf)"
             else
-                _install_file "${script_dir}/csm.ini" "${csm_configs}/" "$mode_conf"
+                local option=""
+                if [[ "${force_install}" == 1 ]]; then option="--force"; fi
+                _install_file "${script_dir}/csm.ini" "${csm_configs}/" "$mode_conf" "$option"
             fi
         fi
     fi
