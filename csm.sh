@@ -101,28 +101,12 @@ _detect_os() {
     os_type=$(uname -s)
 }
 
-_get_file_info() {
+_get_file_mode() {
     local file
     file="${1:-}"
-    declare -gA file_info
     case $os_type in
-        Darwin|*BSD)
-            file_info[owner]=   "$(stat -f '%Su' "$file" 2>/dev/null)"
-            file_info[uid]=     "$(stat -f '%u' "$file"  2>/dev/null)"
-            file_info[group]=   "$(stat -f '%Sg' "$file" 2>/dev/null)"
-            file_info[gid]=     "$(stat -f '%g' "$file"  2>/dev/null)"
-            file_info[perms]=   "$(stat -f '%Sp' "$file" 2>/dev/null)"
-            file_info[octal]=   "$(stat -f '%p' "$file"  2>/dev/null)"
-            ;;
-        Linux)
-            file_info[path]=    "$(stat -c '%n' "$file" 2>/dev/null)"
-            file_info[owner]=   "$(stat -c '%U' "$file" 2>/dev/null)"
-            file_info[uid]=     "$(stat -c '%u' "$file" 2>/dev/null)"
-            file_info[group]=   "$(stat -c '%G' "$file" 2>/dev/null)"
-            file_info[gid]=     "$(stat -c '%g' "$file" 2>/dev/null)"
-            file_info[perms]=   "$(stat -c '%A' "$file" 2>/dev/null)"
-            file_info[octal]=   "$(stat -c '%a' "$file" 2>/dev/null)"
-            ;;
+        Darwin|*BSD)  stat -f '%p' "$file" 2>/dev/null ;;
+        Linux)        stat -c '%a' "$file" 2>/dev/null ;;
     esac
 }
 
@@ -350,8 +334,7 @@ _ensure_perms() {
         return 1
     fi
     local mode
-    _get_file_info "$target"
-    mode="${file_info[octal]:-}"
+    mode="$(_get_file_mode "$target")"
     if [[ -z "$mode" ]]; then
         _log WARN "Unable to get permissions for $target"
         _log WARN "Fix manually: sudo chmod 2770 \"$stack_dir\" && find \"$stack_dir\" -type f -exec chmod 660 {} \\;"
@@ -822,9 +805,9 @@ _secret_validate_file() {
     if [[ ! -r "$file" ]]; then
         _log EXIT "Secret file exists but is not readable: $file"
     fi
-    _get_file_info "$file"
-    if [[ "${file_info[octal]:-}" != "600" ]]; then
-        _log WARN "Secret file permissions are ${file_info[octal]:-}, expected 600."
+    mode="$(_get_file_mode "$file")"
+    if [[ "${mode:-}" != "600" ]]; then
+        _log WARN "Secret file permissions are ${mode:-}, expected 600."
     fi
 }
 
