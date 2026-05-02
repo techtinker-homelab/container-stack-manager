@@ -9,7 +9,7 @@
 #   ./<repo>/
 #   ├── csm.sh              ← Main runtime script (symlinked to /usr/local/bin/csm during install)
 #   ├── csm-install.sh      ← One-shot installer (run once; sets up the environment)
-#   ├── csm.ini             ← Default configuration values
+
 #   ├── example.env         ← Example environment template
 #   └── README.md           ← Project description and instructions for installation and use.
 #
@@ -20,7 +20,7 @@
 #   │     └── <stack>-YYYYMMDD_HHMMSS.tar.gz  ← backup file for each stack
 #   ├── .configs/
 #   │  ├── csm.sh                   ← main CSM script containing all helper scripts
-#   │  ├── csm.ini                  ← default configuration variables (from repo template)
+#   │  ├── user.conf                ← user configuration variables
 #   │  ├── local.env                ← Podman and Docker Local variables
 #   │  ├── local.yml                ← example compose.yml for "local" Docker & Podman
 #   │  ├── swarm.env                ← Docker Swarm specific variables
@@ -45,7 +45,7 @@ set -euo pipefail
 # =============================================================================
 readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
-csm_debug="1" # set to "1" to display debug step messages
+csm_debug="0" # set to "1" to display debug step messages
 csm_cmd=""    # set by _detect_runtime
 scope=""      # set by _detect_scope
 
@@ -101,7 +101,7 @@ _detect_os() {
     os_type=$(uname -s)
 }
 
-_get_file_mode() {
+_get_mode() {
     local file
     file="${1:-}"
     case $os_type in
@@ -286,7 +286,6 @@ _confirm_no() {
 
 _setup_variables() {
     local config_files=(
-        "${script_dir}/csm.ini"
         "${script_dir}/user.conf"
         "${HOME}/.config/csm/user.conf"
     )
@@ -299,32 +298,20 @@ _setup_variables() {
     done
 
     # Assign directory variables with defaults
-    csm_dir="${CSM_ROOT_DIR:-/srv/stacks}"
-    csm_backups="${CSM_BACKUPS_DIR:-${csm_dir}/.backups}"
-    csm_configs="${CSM_CONFIGS_DIR:-${csm_dir}/.configs}"
-    csm_secrets="${CSM_SECRETS_DIR:-${csm_dir}/.secrets}"
-    csm_templates="${CSM_TEMPLATES_DIR:-${csm_dir}/.templates}"
+    csm_dir="${CSM_DIR:-/srv/stacks}"
+    csm_backups="${CSM_BACKUPS:-${csm_dir}/.backups}"
+    csm_configs="${CSM_CONFIGS:-${csm_dir}/.configs}"
+    csm_secrets="${CSM_SECRETS:-${csm_dir}/.secrets}"
+    csm_templates="${CSM_TEMPLATES:-${csm_dir}/.templates}"
 
     # Assign operation variables with defaults
-    csm_gid="${CSM_STACKS_GID:-$(_get_gid "${csm_cmd:-docker}")}"
-    csm_uid="${CSM_STACKS_UID:-$(_get_uid)}"
+    csm_gid="${CSM_GID:-$(_get_gid "${csm_cmd:-docker}")}"
+    csm_uid="${CSM_UID:-$(_get_uid)}"
     csm_group=$(_get_group "$csm_gid")
     csm_owner=$(_get_owner "$csm_uid")
-    csm_net_name="${CSM_NETWORK_NAME:-csm_network}"
+    csm_network="${CSM_NETWORK:-csm_network}"
     csm_version=${CSM_VERSION:-unknown}
-
-    local reverse_proxy_list=(
-        traefik
-        caddy
-        caddy-manager
-        caddymanager
-        nxpm
-        nginx-proxy-manager
-        npm
-        haproxy
-    )
 }
-
 
 _ensure_perms() {
     local target="${1:-}"
@@ -334,7 +321,7 @@ _ensure_perms() {
         return 1
     fi
     local mode
-    mode="$(_get_file_mode "$target")"
+    mode="$(_get_mode "$target")"
     if [[ -z "$mode" ]]; then
         _log WARN "Unable to get permissions for $target"
         _log WARN "Fix manually: sudo chmod 2770 \"$stack_dir\" && find \"$stack_dir\" -type f -exec chmod 660 {} \\;"
@@ -459,6 +446,17 @@ stack_create() {
 
     _log STEP "stack_create: creating directories..."
     install -o "$csm_uid" -g "$csm_gid" -m "$mode_dirs" -d "$stack_dir"
+
+    local reverse_proxy_list=(
+        traefik
+        caddy
+        caddy-manager
+        caddymanager
+        nxpm
+        nginx-proxy-manager
+        npm
+        haproxy
+    )
     for app_name in "${reverse_proxy_list[@]}"; do
         if [[ "${stack_name}" == "${app_name}" ]]; then
             install -o "$csm_uid" -g "$csm_gid" -m "$mode_auth" -d "$stack_dir"/certs
@@ -471,12 +469,12 @@ stack_create() {
         install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$temp_compose" "$stack_dir/compose.yml"
 
         # Inject the dynamic network name into the static template
-        sed -i "s/CSM_NETWORK_PLACEHOLDER/${csm_net_name}/g" "$stack_dir/compose.yml"
+        sed -i "s/CSM_NETWORK_PLACEHOLDER/${csm_network}/g" "$stack_dir/compose.yml"
     else
         _log WARN "Template not found: $temp_compose. Falling back to internal boilerplate."
         cat > "${stack_dir}/compose.yml" <<EOF
 networks:
-  ${csm_net_name}:
+  ${csm_network}:
     external: true
 
 services:
@@ -485,7 +483,7 @@ services:
     image: repo/imagename:latest
     restart: unless_stopped
     networks:
-        - ${csm_net_name}
+        - ${csm_network}
 EOF
     fi
 
@@ -805,7 +803,7 @@ _secret_validate_file() {
     if [[ ! -r "$file" ]]; then
         _log EXIT "Secret file exists but is not readable: $file"
     fi
-    mode="$(_get_file_mode "$file")"
+    mode="$(_get_mode "$file")"
     if [[ "${mode:-}" != "600" ]]; then
         _log WARN "Secret file permissions are ${mode:-}, expected 600."
     fi
@@ -1088,7 +1086,7 @@ stack_ps() {
 
 net_info() {
     local action="${1:-list}"
-    local target="${2:-${csm_net_name}}"
+    local target="${2:-${csm_network}}"
 
     _log STEP "net_info: action=$action"
 
@@ -1124,7 +1122,7 @@ manage_config() {
             _log INFO "Active configuration:"
             printf "  %-28s = %s\n" \
                 "csm_cmd:"      "${csm_cmd:-<not detected>}" \
-                "csm_net_name:"  "$csm_net_name" \
+                "csm_network:"   "$csm_network" \
                 "csm_gid/group:" "$csm_gid/$csm_group" \
                 "csm_uid/owner:" "$csm_uid/$csm_owner" \
                 "csm_dir:"       "$csm_dir"   \
@@ -1188,6 +1186,7 @@ manage_template() {
 # =============================================================================
 
 _print_aliases() {
+    _setup_variables
     _log STEP "_print_aliases: genssh, ctupdate, cds"
     cat <<ALIAS
 # Container Stack Manager — shell helpers
@@ -1195,12 +1194,12 @@ _print_aliases() {
 
 # Check host and container IPs
 hostip() { echo "Host IP: \$(curl -fsSL ifconfig.me 2>/dev/null || wget -qO- ifconfig.me)"; }
-lancheck() { echo "Container IP: \$(${csm_cmd} container exec -it "\${1}" curl -fsSL ipinfo.io 2>/dev/null || wget -qO- ipinfo.io)"; }
-vpncheck() { echo "Container IP: \$(${csm_cmd} container exec -it "\${1}" curl -fsSL ipinfo.io/ip 2>/dev/null || wget -qO- ipinfo.io/ip)" && \\
+lanip() { echo "Container IP: \$(${csm_cmd} container exec -it "\${1}" curl -fsSL ipinfo.io 2>/dev/null || wget -qO- ipinfo.io)"; }
+vpnip() { echo "Container IP: \$(${csm_cmd} container exec -it "\${1}" curl -fsSL ipinfo.io/ip 2>/dev/null || wget -qO- ipinfo.io/ip)" && \\
             echo "     Host IP: \$(curl -fsSL ifconfig.me 2>/dev/null || wget -qO- ifconfig.me)"; }
 # Create encryption key
 genkey() { openssl rand -hex \${1:-32}; }
-ctupdate() {
+wtup() {
     [[ -z \$1 ]] || echo "Usage: ctupdate <container-name>"; return 0
     $csm_cmd run --rm --name "\$1-update" -v /var/run/$csm_cmd.sock:/var/run/$csm_cmd.sock ghcr.io/nicholas-fedor/watchtower --run-once "\$1";
 }
@@ -1214,6 +1213,7 @@ ALIAS
 # =============================================================================
 
 show_help() {
+    _setup_variables
     cat <<EOF
 ${bld}Container Stack Manager (CSM) v${csm_version}${rst}
 
@@ -1271,16 +1271,16 @@ main() {
     local cmd="${1:-}"
     _color_setup
     _detect_os
+    if [[ -z "$cmd" ]]; then show_help; exit 0; fi
+    case "$cmd" in
+        -a | --aliases)     _print_aliases; exit 0 ;;
+        -h | *help | "")    show_help; exit 0 ;;
+        -v | --version)     echo "CSM v${csm_version}"; exit 0 ;;
+    esac
+
     _setup_variables
     _check_prereqs
-    if [[ -z "$cmd" ]]; then show_help; exit 0; fi
     shift || true
-
-    case "$cmd" in
-        -a | --aliases)         _print_aliases; exit 0 ;;
-        -h | --help | help)     show_help; exit 0 ;;
-        -v | --version)         echo "CSM v${csm_version}"; exit 0 ;;
-    esac
 
     case "$cmd" in
         c|create|n|new)     stack_create            "$@" ;;

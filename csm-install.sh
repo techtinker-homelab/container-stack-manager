@@ -22,33 +22,16 @@ set -euo pipefail
 #   - Set final ownership
 
 # =============================================================================
-# CREATE LOCKFILE TO PREVENT DUPLICATE CONCURRENT INSTALLATIONS
-# =============================================================================
-
-LOCKFILE="/var/lock/csm-install.lock"
-if ! command -v flock >/dev/null 2>&1; then
-    echo "WARNING: flock not found - install util-linux or coreutils for safety." >&2
-    exit 1
-fi
-exec 200>"$LOCKFILE"
-if ! flock -n 200; then
-    echo "Another instance of csm-install.sh is already running." >&2
-    exit 1
-fi
-
-# =============================================================================
 # GLOBAL INSTALLATION VARIABLES, SET TO "1" VIA COMMAND OPTIONS
 # =============================================================================
 
-csm_version="0.4.9"
+csm_version="0.5.0"
 
 # Install operation flags
 dry_run=0
 csm_debug=0
 force_install=0
 uninstall_mode=0
-
-declare -gA user_overrides
 
 # =============================================================================
 # ENSURE SCRIPT NOT SOURCED
@@ -82,24 +65,72 @@ fi
 # =============================================================================
 
 # NOTE: Change these to work on your intended container host
+var_defaults() {
+    # Container runtime (docker or podman, leave blank to choose during installation)
+    CSM_RUNTIME="${CSM_RUNTIME:-}"
 
-# local dirs_list=(
-#     "${CSM_ROOT_DIR}"
-#     "${CSM_BACKUPS_DIR}"
-#     "${CSM_CONFIGS_DIR}"
-#     "${CSM_SECRETS_DIR}"
-#     "${CSM_TEMPLATES_DIR}"
-# )
+    # Stacks group and user (blank so current user id is used)
+    CSM_GID="${CSM_GID:-2000}"
+    CSM_UID="${CSM_UID:-}"
 
-# local file_list=(
-#     "${CSM_CONFIGS_DIR}/csm.sh"
-#     "${CSM_CONFIGS_DIR}/csm.ini"
-#     "${CSM_CONFIGS_DIR}/local.env"
-#     "${CSM_CONFIGS_DIR}/local.yml"
-#     "${CSM_CONFIGS_DIR}/swarm.env"
-#     "${CSM_CONFIGS_DIR}/swarm.yml"
-#     "${CSM_CONFIGS_DIR}/user.conf"
-# )
+    # Root directory for all stack files
+    CSM_DIR="${CSM_DIR:-/srv/stacks}"
+    CSM_BACKUPS="${CSM_DIR}/.backups"
+    CSM_CONFIGS="${CSM_DIR}/.configs"
+    CSM_SECRETS="${CSM_DIR}/.secrets"
+    CSM_TEMPLATES="${CSM_DIR}/.templates"
+
+    # File templates
+    CSM_ENV_LOCAL="local.env"
+    CSM_ENV_SWARM="swarm.env"
+    CSM_YML_LOCAL="local.yml"
+    CSM_YML_SWARM="swarm.yml"
+    CSM_CONF_FILE="user.conf"
+    CSM_CORE_FILE="csm.sh"
+
+    # Container orchestration settings
+    CSM_BACKUP_MAX_AGE=30
+    CSM_BACKUP_COMPRESSION="zip"
+    CSM_NETWORK="external_edge"
+    CSM_NET_CIDR="172.20.0.0/16"
+    CSM_VOLUME_SCOPE="local"
+    CSM_VOLUME_LABEL="csm_volume"
+
+    # Stack template settings
+    CSM_TEMPLATE_SOURCE="gitlab"
+    CSM_TEMPLATE_BRANCH="main"
+    CSM_TEMPLATE_REPO_NAME="csm_templates"
+    CSM_TEMPLATE_UPDATE_INTERVAL=7
+    CSM_TEMPLATE_CODEBERG_OWNER="techtinker"
+    CSM_TEMPLATE_CODEBERG_URL="https://codeberg.org/\${CSM_TEMPLATE_CODEBERG_OWNER}/\${CSM_TEMPLATE_REPO_NAME}"
+    CSM_TEMPLATE_CODEBERG_RAW="https://codeberg.org/\${CSM_TEMPLATE_CODEBERG_OWNER}/\${CSM_TEMPLATE_REPO_NAME}/raw/branch/\${CSM_TEMPLATE_BRANCH}"
+    CSM_TEMPLATE_GITHUB_OWNER='techtinker-homelab'
+    CSM_TEMPLATE_GITHUB_URL="https://github.com/\${CSM_TEMPLATE_GITHUB_OWNER}/\${CSM_TEMPLATE_REPO_NAME}"
+    CSM_TEMPLATE_GITHUB_RAW="https://raw.githubusercontent.com/\${CSM_TEMPLATE_GITHUB_OWNER}/\${CSM_TEMPLATE_REPO_NAME}/\${CSM_TEMPLATE_BRANCH}"
+    CSM_TEMPLATE_GITLAB_OWNER="techtinker"
+    CSM_TEMPLATE_GITLAB_URL="https://gitlab.com/\${CSM_TEMPLATE_GITLAB_OWNER}/\${CSM_TEMPLATE_REPO_NAME}"
+    CSM_TEMPLATE_GITLAB_RAW="https://gitlab.com/\${CSM_TEMPLATE_GITLAB_OWNER}/\${CSM_TEMPLATE_REPO_NAME}/-/raw/\${CSM_TEMPLATE_BRANCH}"
+
+    CSM_VERSION="${CSM_VERSION:-0.4.9}"
+
+    # Folders list to be created
+    declare -ga dirs_list=(
+        "${CSM_DIR}"        # "/srv/stacks"
+        "${CSM_BACKUPS}"    # "/srv/stacks/.backups"
+        "${CSM_CONFIGS}"    # "/srv/stacks/.configs"
+        "${CSM_SECRETS}"    # "/srv/stacks/.secrets"
+        "${CSM_TEMPLATES}"  # "/srv/stacks/.templates"
+    )
+
+    # Files list to be copied or created
+    declare -ga file_list=(
+        "${CSM_ENV_LOCAL}"  # "local.env"
+        "${CSM_ENV_SWARM}"  # "swarm.env"
+        "${CSM_YML_LOCAL}"  # "local.yml"
+        "${CSM_YML_SWARM}"  # "swarm.yml"
+        "${CSM_CORE_FILE}"  # "csm.sh"
+    )
+}
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -221,27 +252,37 @@ _write_value() {
 }
 
 # =============================================================================
-# CONFIGURATION  (override via env vars before calling the script)
+# VARIABLES SETUP
 # =============================================================================
+# NOTE: override via env vars before calling the script
 
 _vars_setup() {
-    local csm_ini_file="${script_dir}/csm.ini"
-    # Global config variables - ordered list and values
+    # Set default values
+    var_defaults
+
+    # Variable order for iteration
     declare -ga csm_var_order
     csm_var_order=(
         CSM_VERSION
-        CSM_CONTAINER_RUNTIME
-        CSM_STACKS_GID
-        CSM_STACKS_UID
-        CSM_ROOT_DIR
-        CSM_BACKUPS_DIR
-        CSM_CONFIGS_DIR
-        CSM_SECRETS_DIR
-        CSM_TEMPLATES_DIR
-        CSM_NETWORK_NAME
-        CSM_NETWORK_SUBNET
-        CSM_VOLUME_DRIVER
+        CSM_RUNTIME
+        CSM_GID
+        CSM_UID
+        CSM_DIR
+        CSM_BACKUPS
+        CSM_CONFIGS
+        CSM_SECRETS
+        CSM_TEMPLATES
+        CSM_NETWORK
+        CSM_NET_CIDR
+        CSM_VOLUME_SCOPE
         CSM_VOLUME_LABEL
+        CSM_BACKUP_MAX_AGE
+        CSM_BACKUP_COMPRESSION
+        CSM_ENV_LOCAL
+        CSM_ENV_SWARM
+        CSM_YML_LOCAL
+        CSM_YML_SWARM
+        CSM_CONF_FILE
         CSM_TEMPLATE_SOURCE
         CSM_TEMPLATE_BRANCH
         CSM_TEMPLATE_REPO_NAME
@@ -255,136 +296,63 @@ _vars_setup() {
         CSM_TEMPLATE_GITHUB_OWNER
         CSM_TEMPLATE_GITHUB_URL
         CSM_TEMPLATE_GITHUB_RAW
-        CSM_BACKUP_MAX_AGE
-        CSM_BACKUP_COMPRESSION
-        CSM_ENV_TEMP
-        CSM_ENV_LOCAL
-        CSM_ENV_SWARM
-        CSM_COMPOSE_TEMP
-        CSM_COMPOSE_PROD
     )
-    declare -gA csm_vars
-    csm_vars[CSM_VERSION]="${csm_version:-undefined}"
-    csm_vars[CSM_CONTAINER_RUNTIME]=""
-    csm_vars[CSM_STACKS_GID]="2000"
-    csm_vars[CSM_STACKS_UID]=""
-    csm_vars[CSM_ROOT_DIR]="/srv/stacks"
-    csm_vars[CSM_BACKUPS_DIR]="\${CSM_ROOT_DIR}/.backups"
-    csm_vars[CSM_CONFIGS_DIR]="\${CSM_ROOT_DIR}/.configs"
-    csm_vars[CSM_SECRETS_DIR]="\${CSM_ROOT_DIR}/.secrets"
-    csm_vars[CSM_TEMPLATES_DIR]="\${CSM_ROOT_DIR}/.templates"
-    csm_vars[CSM_NETWORK_NAME]="csm_network"
-    csm_vars[CSM_NETWORK_SUBNET]="172.20.0.0/16"
-    csm_vars[CSM_VOLUME_DRIVER]="local"
-    csm_vars[CSM_VOLUME_LABEL]="csm-volume"
-    csm_vars[CSM_TEMPLATE_SOURCE]="gitlab"
-    csm_vars[CSM_TEMPLATE_BRANCH]="main"
-    csm_vars[CSM_TEMPLATE_REPO_NAME]="csm-templates"
-    csm_vars[CSM_TEMPLATE_UPDATE_INTERVAL]="7"
-    csm_vars[CSM_TEMPLATE_GITLAB_OWNER]="techtinker"
-    csm_vars[CSM_TEMPLATE_GITLAB_URL]="https://gitlab.com/\${CSM_TEMPLATE_GITLAB_OWNER}/\${CSM_TEMPLATE_REPO_NAME}"
-    csm_vars[CSM_TEMPLATE_GITLAB_RAW]="https://gitlab.com/\${CSM_TEMPLATE_GITLAB_OWNER}/\${CSM_TEMPLATE_REPO_NAME}/-/\raw/\${CSM_TEMPLATE_BRANCH}"
-    csm_vars[CSM_TEMPLATE_CODEBERG_OWNER]="techtinker"
-    csm_vars[CSM_TEMPLATE_CODEBERG_URL]="https://codeberg.org/\${CSM_TEMPLATE_CODEBERG_OWNER}/\${CSM_TEMPLATE_REPO_NAME}"
-    csm_vars[CSM_TEMPLATE_CODEBERG_RAW]="https://codeberg.org/\${CSM_TEMPLATE_CODEBERG_OWNER}/\${CSM_TEMPLATE_REPO_NAME}/raw/\branch/\${CSM_TEMPLATE_BRANCH}"
-    csm_vars[CSM_TEMPLATE_GITHUB_OWNER]="techtinker-homelab"
-    csm_vars[CSM_TEMPLATE_GITHUB_URL]="https://github.com/\${CSM_TEMPLATE_GITHUB_OWNER}/\${CSM_TEMPLATE_REPO_NAME}"
-    csm_vars[CSM_TEMPLATE_GITHUB_RAW]="https://raw.githubusercontent.com/\${CSM_TEMPLATE_GITHUB_OWNER}/\${CSM_TEMPLATE_REPO_NAME}/\${CSM_TEMPLATE_BRANCH}"
-    csm_vars[CSM_BACKUP_MAX_AGE]="30"
-    csm_vars[CSM_BACKUP_COMPRESSION]="gz"
-    csm_vars[CSM_ENV_TEMP]="example.env"
-    csm_vars[CSM_ENV_LOCAL]="local.env"
-    csm_vars[CSM_ENV_SWARM]="swarm.env"
-    csm_vars[CSM_COMPOSE_TEMP]="local-compose.yml"
-    csm_vars[CSM_COMPOSE_PROD]="swarm-compose.yml"
 
-    # Create fresh csm.ini if it does not exist (fallback defaults)
-    if [[ ! -f "$csm_ini_file" ]]; then
-        local csm_ini_temp="${script_dir}/../csm.ini"   # template lives next to the repo root
-        if [[ -f "$csm_ini_temp" ]]; then
-            cp "$csm_ini_temp" "$csm_ini_file"
-            _log STEP "Copied default config template to $csm_ini_file"
-        else
-            {   _log STEP "# Default CSM configuration - generated by csm-install.sh"
-                _log STEP "# csm_version = ${csm_vars[CSM_VERSION]:-undefined}"
-                for var in "${csm_var_order[@]}"; do
-                    echo "${var}=${csm_vars[$var]}"
-                done
-            } >"$csm_ini_file"
-            _log STEP "Created minimal config file at: $csm_ini_file"
-        fi
+    # Source ${CSM_CONF_FILE} to override defaults if it exists
+    csm_user_conf="${CSM_CONFIGS}/${CSM_CONF_FILE}"
+    if [[ -f "$csm_user_conf" ]]; then
+        source "$csm_user_conf"
+        _log STEP "Loaded user overrides from $csm_user_conf"
+    else
+        _log STEP "No ${CSM_CONF_FILE} found, using defaults"
     fi
 
-    # Load defaults from csm.ini
-    source "$csm_ini_file"
-    _log STEP "Loaded defaults from $csm_ini_file"
+    # Basic validation of loaded values
+    if ! [[ "${CSM_BACKUP_MAX_AGE}" =~ ^[0-9]+$ ]]; then
+        _log STEP "Invalid CSM_BACKUP_MAX_AGE: '${CSM_BACKUP_MAX_AGE}', using default"
+        CSM_BACKUP_MAX_AGE="30"
+    fi
+    if ! [[ "${CSM_GID}" =~ ^[0-9]+$ ]]; then
+        _log STEP "Invalid CSM_GID: '${CSM_GID}', using default"
+        CSM_GID="2000"
+    fi
+    if ! [[ "${CSM_UID}" =~ ^[0-9]+$ ]] && [[ -n "${CSM_UID}" ]]; then
+        _log STEP "Invalid CSM_UID: '${CSM_UID}', using default"
+        CSM_UID=""
+    fi
+    if ! [[ "${CSM_TEMPLATE_UPDATE_INTERVAL}" =~ ^[0-9]+$ ]]; then
+        _log STEP "Invalid CSM_TEMPLATE_UPDATE_INTERVAL: '${CSM_TEMPLATE_UPDATE_INTERVAL}', using default"
+        CSM_TEMPLATE_UPDATE_INTERVAL="7"
+    fi
+    # Validate CSM_DIR: must be absolute and not in script directory
+    if [[ -n "${CSM_DIR}" && ("${CSM_DIR}" != /* || "${CSM_DIR}" == "${script_dir}"* || "${CSM_DIR}" == *"csm-install.sh"*) ]]; then
+        _log STEP "Invalid CSM_DIR: '${CSM_DIR}', using default: '/srv/stacks'"
+        CSM_DIR="/srv/stacks"
+    fi
 
-    # Store all CSM_* values in associative array for unified handling
-    declare -gA csm_values
-    while IFS='=' read -r key val; do
-        if [[ -n "$key" ]]; then
-            val="$(_parse_value "$val")"
-            # Basic validation
-            case "$key" in
-                CSM_BACKUP_MAX_AGE|CSM_STACKS_GID|CSM_STACKS_UID|CSM_TEMPLATE_UPDATE_INTERVAL)
-                    if ! [[ "$val" =~ ^[0-9]+$ ]]; then
-                        _log STEP "Invalid numeric value for $key: '$val', using default"
-                        val="${csm_vars[$key]:-}"
-                    fi
-                    ;;
-                CSM_ROOT_DIR)
-                    if [[ -n "$val" && "$val" != /* ]]; then
-                        _log STEP "CSM_ROOT_DIR must be absolute path: '$val', using default"
-                        val="${csm_vars[$key]:-}"
-                    fi
-                    ;;
-            esac
-            csm_values[$key]="$val"
-        fi
-    done < <(grep -v '^#' "$csm_ini_file" | grep '=')
-    _log STEP "Loaded ${#csm_values[@]} config values from csm.ini"
-
-    # User overrides (populated in _user_input, written to user.conf in _setup_files)
-    declare -gA user_overrides
-
-    # Map CSM_* names to internal vars with defaults
-    csm_version="${CSM_VERSION:-undefined}"
-    csm_runtime="${CSM_CONTAINER_RUNTIME:-docker}"
-    csm_net_name="${CSM_NETWORK_NAME:-csm_network}"
-    csm_gid="${csm_gid:-${CSM_STACKS_GID:-2000}}"
-    csm_uid="${CSM_STACKS_UID:-${SUDO_UID:-$(id -u)}}"
-
-    # Map CSM_ dir vars to internal vars with defaults
-    csm_dir="${CSM_ROOT_DIR:-/srv/stacks}"
-    csm_backups="${CSM_BACKUPS_DIR:-${csm_dir}/.backups}"
-    csm_configs="${CSM_CONFIGS_DIR:-${csm_dir}/.configs}"
-    csm_secrets="${CSM_SECRETS_DIR:-${csm_dir}/.secrets}"
-    csm_templates="${CSM_TEMPLATES_DIR:-${csm_dir}/.templates}"
-
-    readonly csm_user_conf="${csm_configs}/user.conf"
-
-    # Export internal names for use by other functions
-    export csm_runtime csm_gid csm_uid csm_version csm_net_name \
-            csm_dir csm_backups csm_configs csm_secrets csm_templates
+    # Map CSM_* to internal csm_* variables (with variable expansion)
+    csm_version="${CSM_VERSION:-${csm_version:-undefined}}"
+    csm_runtime="${CSM_RUNTIME:-docker}"
+    csm_gid="${CSM_GID:-2000}"
+    csm_uid="${CSM_UID:-${SUDO_UID:-$(id -u)}}"
+    csm_dir="${CSM_DIR:-/srv/stacks}"
+    csm_backups="$(eval echo "${CSM_BACKUPS}")"
+    csm_configs="$(eval echo "${CSM_CONFIGS}")"
+    csm_secrets="$(eval echo "${CSM_SECRETS}")"
+    csm_templates="$(eval echo "${CSM_TEMPLATES}")"
+    csm_network="${CSM_NETWORK:-csm_network}"
 
     # Owner/group setup (runtime-dependent, so after sourcing)
     csm_owner="${SUDO_USER:-$(id -un)}"
-    csm_group="docker"   # default, overridden after runtime detection
-    csm_gid="${CSM_STACKS_GID:-2000}"  # re-assign if user override
+    csm_group="${CSM_GROUP:-docker}"   # default, overridden after runtime detection
 
     readonly csm_link="${HOME}/stacks"
     readonly bin_link="/usr/local/bin/csm"
 
-    # Permission modes (move to csm.ini if configurable, else keep here)
-    readonly mode_exec="770"
-    readonly mode_conf="660"
     readonly mode_auth="600"
+    readonly mode_conf="660"
+    readonly mode_exec="770"
 
-    # Files to install (csm.ini is handled in _vars_setup, user.conf created on first run)
-    declare -A files_to_install=(
-        ["${script_dir}/csm.sh"]="${csm_configs}/"
-        ["${script_dir}/csm.ini"]="${csm_configs}/"
-    )
     _log STEP "_vars_setup complete: runtime=${csm_runtime}, dir=${csm_dir}"
 }
 
@@ -395,83 +363,70 @@ _user_input() {
     # Ordered list of user prompted vars
     declare -ga csm_var_prompt
     csm_var_prompt=(
-        CSM_CONTAINER_RUNTIME
-        CSM_STACKS_GID
-        CSM_STACKS_UID
-        CSM_ROOT_DIR
-        CSM_NETWORK_NAME
-        CSM_NETWORK_SUBNET
-        CSM_VOLUME_DRIVER
+        CSM_GID
+        CSM_UID
+        CSM_DIR
+        CSM_RUNTIME
+        CSM_NETWORK
+        CSM_NET_CIDR
+        CSM_VOLUME_SCOPE
         CSM_BACKUP_MAX_AGE
         CSM_BACKUP_COMPRESSION
         CSM_ENV_LOCAL
         CSM_ENV_SWARM
         )
-        # Templates are not yet implemented
+        # Templates are not yet implemented, add to above array when coded
         # CSM_TEMPLATE_SOURCE
         # CSM_TEMPLATE_BRANCH
         # CSM_TEMPLATE_REPO_NAME
         # CSM_TEMPLATE_UPDATE_INTERVAL
 
-    # Ensure user.conf exists with defaults if not present
+    # Ensure ${CSM_CONF_FILE} exists with current values if not present
     local user_conf="${csm_user_conf}"
     if [[ ! -f "$user_conf" ]]; then
-        _log STEP "Creating user.conf with defaults from csm.ini"
-        cp "${csm_configs}/csm.ini" "$user_conf"
+        _log STEP "Creating ${CSM_CONF_FILE} with current values"
+        mkdir -p "$(dirname "$user_conf")"
+        for var in "${csm_var_order[@]}"; do
+            echo "${var}=${!var}" >> "$user_conf"
+        done
         chown "${csm_uid}:${csm_gid}" "$user_conf"
         chmod "$mode_conf" "$user_conf"
-        _log STEP "Created user.conf with default values"
-    fi
-
-    # Load existing user.conf
-    if [[ -f "$user_conf" ]]; then
-        while IFS='=' read -r key val; do
-            if [[ -n "$key" ]]; then
-                user_overrides[$key]="$(_parse_value "$val")"
-            fi
-        done < "$user_conf"
-        _log STEP "Loaded ${#user_overrides[@]} values from existing user.conf"
+        _log STEP "Created ${CSM_CONF_FILE} with current values"
     fi
 
     if _confirm_no "Reset all values to defaults?"; then
         _log STEP "_user_input: resetting to defaults"
-        for var in "${csm_var_prompt[@]}"; do
-            local default_val="${csm_vars[$var]}"
-            # Use detected values for runtime/UID instead of blank defaults
-            case "$var" in
-                CSM_CONTAINER_RUNTIME) default_val="$csm_runtime" ;;
-                CSM_STACKS_UID) default_val="$csm_uid" ;;
-            esac
-            sed -i "s|^${var}=.*$|${var}=\"${default_val}\"|" "$user_conf"
-            user_overrides[$var]="$default_val"
+        var_defaults
+        # Write defaults to ${CSM_CONF_FILE}
+        : > "$user_conf"
+        for var in "${csm_var_order[@]}"; do
+            echo "${var}=${!var}" >> "$user_conf"
         done
         _log STEP "All values reset to defaults"
     fi
+
     if _confirm_no "Do you want to manually edit any of the configuration values?"; then
         _log STEP "Press ENTER to keep the current value in brackets."
         local var cur new updated=0
         _log STEP "Prompting for ${#csm_var_prompt[@]} variables..."
         for var in "${csm_var_prompt[@]}"; do
-            cur="${user_overrides[$var]:-}"
-            [[ -z "$cur" ]] && cur="${csm_values[$var]:-}"
-            [[ -z "$cur" ]] && cur="${csm_vars[$var]:-}"
+            # Get current value from the CSM_* variable
+            cur="${!var}"
             read -r -p "Current value for ${var} [${cur}]: " new
-            # If no input provided, use detected values for runtime/UID
-            if [[ -z "$new" ]]; then
-                case "$var" in
-                    CSM_CONTAINER_RUNTIME) new="$csm_runtime" ;;
-                    CSM_STACKS_UID) new="$csm_uid" ;;
-                esac
-            fi
             if [[ -n "$new" ]]; then
                 new="$(_sanitize_input "$new")"
-                sed -i "s|^${var}=.*$|${var}=\"${new}\"|" "$user_conf"
-                user_overrides[$var]="$new"
+                # Update the CSM_* variable
+                declare "$var=$new"
                 _log STEP "Set ${var}=${new}"
                 updated=$((updated + 1))
             fi
         done
-        _log STEP "Updated ${updated} values in user.conf"
+        # Write all CSM_* variables to ${CSM_CONF_FILE}
+        : > "$user_conf"
+        for var in "${csm_var_order[@]}"; do
+            echo "${var}=${!var}" >> "$user_conf"
+        done
+        _log STEP "Updated ${updated} values in ${CSM_CONF_FILE}"
     fi
 }
 
@@ -795,167 +750,70 @@ _install_dir() {
 }
 
 _install_file() {
-    local src="${1:-}" dest_dir="${2:-}" mode="${3:-}" flag="${4:-}"
+    local src="${1:-}" dest="${2:-}" mode="${3:-}" flag="${4:-}"
     local filename=$(basename "$src")
+    if [[ "${force_install}" == 1 ]]; then flag="--force"; fi
 
     if [[ -f "$src" ]]; then
         _log STEP "_install_file: installing $filename (mode=$mode)"
         case "$flag" in
             -f | --force)
                 # Overwrite target file, -p: preserve timestamps
-                $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -p "$src" "$dest_dir/"
+                $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -p "$src" "$dest/"
                 ;;
             *)
                 # Only copy if changed, -C: only copy if different
-                $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -C "$src" "$dest_dir/"
+                $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -C "$src" "$dest/"
         esac
-        _log INFO "Installed: $filename → $dest_dir"
+        _log INFO "Installed: $filename → $dest"
     else
         _log WARN "Source file missing: $src"
     fi
 }
 
 _setup_folders() {
-    _log STEP "_setup_folders: initializing structure at ${CSM_ROOT_DIR}"
-    local target_dirs=(
-        "${CSM_ROOT_DIR}"
-        "${CSM_BACKUPS_DIR}"
-        "${CSM_CONFIGS_DIR}"
-        "${CSM_SECRETS_DIR}"
-        "${CSM_TEMPLATES_DIR}"
-    )
-    for dir in "${target_dirs[@]}"; do
-        _install_dir "$dir" "$mode_exec"
+    _log STEP "_setup_folders: initializing directory structure at ${CSM_DIR}"
+
+    for dir in "${dirs_list[@]}"; do
+        if [[ "$dry_run" == 1 ]]; then
+            _log INFO "Would create directory: ${dir}"
+        else
+            _install_dir "$dir" "$mode_exec"
+        fi
     done
 
     # Set secrets directory to more restrictive permissions
-    if [[ -d "$CSM_SECRETS_DIR" ]]; then
+    if [[ -d "$CSM_SECRETS" ]]; then
         if [[ "$dry_run" == 1 ]]; then
             _log INFO "Would set secrets directory to mode 700"
         else
-            $var_sudo chmod $mode_auth "$CSM_SECRETS_DIR"
+            $var_sudo chmod $mode_auth "$CSM_SECRETS"
         fi
     fi
 }
 
 _setup_files() {
-    _log STEP "_setup_files: installing CSM core files..."
+    _log STEP "_setup_files: installing required files in ${csm_configs}"
 
-    # Install csm.sh
-    if [[ -f "${script_dir}/csm.sh" ]]; then
+    for file in "${file_list[@]}"; do
         if [[ "$dry_run" == 1 ]]; then
-            _log INFO "Would install csm.sh to ${csm_configs}/ (mode: $mode_exec)"
+            _log INFO "Would create ${file} in ${CSM_CONFIGS}"
         else
-            local option=""
-            if [[ "${force_install}" == 1 ]]; then option="--force"; fi
-            _install_file "${script_dir}/csm.sh" "${csm_configs}/" "${mode_exec}" "${option}"
-        fi
-    fi
-
-    # Install csm.ini if not already there, or force overwrite
-    local csm_ini_installed="${csm_configs}/csm.ini"
-    if [[ ! -f "$csm_ini_installed" || "$force_install" == 1 ]]; then
-        if [[ -f "${script_dir}/csm.ini" ]]; then
-            if [[ "$dry_run" == 1 ]]; then
-                _log INFO "Would install csm.ini to ${csm_configs}/ (mode: $mode_conf)"
+            # Set appropriate permissions based on file type
+            if [[ "$file" == "${CSM_CORE_FILE}" ]]; then
+                file_mode="$mode_exec"
             else
-                local option=""
-                if [[ "${force_install}" == 1 ]]; then option="--force"; fi
-                _install_file "${script_dir}/csm.ini" "${csm_configs}/" "$mode_conf" "$option"
+                file_mode="$mode_conf"
             fi
+            src_file="${script_dir}/${file}"
+            if [[ ! -f "$src_file" ]]; then src_file="/dev/null"; fi
+            _install_file "$src_file" "${csm_configs}" "$file_mode"
         fi
-    fi
-
-    # # Create/ensure user.conf exists for user overrides
-    # local user_conf="${csm_configs}/user.conf"
-    # local user_conf_global="${csm_user_conf}"
-    # _log STEP "user.conf exists: $([[ -f "$user_conf" ]] && echo yes || echo no)"
-    # _log STEP "user_overrides count: ${#user_overrides[@]}"
-    # _log STEP "force_install: $force_install"
-    # if [[ ! -f "$user_conf_global" || "$force_install" == 1 || "${#user_overrides[@]}" -gt 0 ]]; then
-    #     if [[ "$dry_run" == 1 ]]; then
-    #         _log INFO "Would create user.conf at ${csm_configs}/ (mode: $mode_conf)"
-    #         _log INFO "Would create user.conf at ${user_conf_global} (mode: $mode_conf)"
-    #     else
-    #         if [[ ! -f "$user_conf" ]]; then
-    #             $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" /dev/null "$user_conf"
-    #         fi
-    #         mkdir -p "$(dirname "$user_conf_global")"
-    #         if [[ ! -f "$user_conf_global" ]]; then
-    #             install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" /dev/null "$user_conf_global"
-    #         fi
-    #         # Merge csm_values with user_overrides (user overrides take precedence)
-    #         declare -A merged_values
-    #         for var in "${csm_var_order[@]}"; do
-    #             local val="${csm_values[$var]:-}"
-    #             [[ -n "$val" ]] && merged_values[$var]="$val"
-    #         done
-    #         for var in "${!user_overrides[@]}"; do
-    #             local val="${user_overrides[$var]:-}"
-    #             [[ -n "$val" ]] && merged_values[$var]="$val"
-    #         done
-    #         _log STEP "merged_values contains ${#merged_values[@]} values"
-    #         for var in "${csm_var_order[@]}"; do
-    #             local val="${merged_values[$var]:-}"
-    #             [[ -n "$val" ]] && _log INFO "will_write: ${var}=${val}"
-    #         done
-    #         # Write merged values to file once (in order from csm_var_order)
-    #         : >"$user_conf"
-    #         : >"$user_conf_global"
-    #         local written=0
-    #         for var in "${csm_var_order[@]}"; do
-    #             local val="${merged_values[$var]:-}"
-    #             [[ -n "$val" ]] && echo "${var}=${val}" >>"$user_conf" && echo "${var}=${val}" >>"$user_conf_global" && ((written++))
-    #         done
-    #         _log INFO "Wrote ${written} values to user.conf files"
-    #     fi
-    # else
-    #     _log INFO "user.conf already exists, using existing values"
-    # fi
-
-    # Handle Env Templates
-    local env_example="${script_dir}/example.env"
-    local env_local="${csm_configs}/.local.env"
-    local env_swarm="${csm_configs}/.swarm.env"
-    if [[ -f "$env_example" ]]; then
-        if [[ "$dry_run" == 1 ]]; then
-            _log INFO "Would install example.env to ${csm_configs}/"
-            _log INFO "Would create .local.env and .swarm.env from template"
-        else
-            _install_file "$env_example" "${csm_configs}/" "$mode_conf"
-            if [[ ! -f "$env_local" || "$force_install" == 1 ]]; then
-                $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$env_example" "$env_local"
-            fi
-            if [[ ! -f "$env_swarm" || "$force_install" == 1 ]]; then
-                $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$env_example" "$env_swarm"
-            fi
-            _log INFO "Created/Overwrote local and swarm .env templates"
-        fi
-    fi
-
-    # Handle Compose Templates
-    local compose_example="${script_dir}/example-compose.yml"
-    local compose_local="${csm_configs}/local-compose.yml"
-    local compose_swarm="${csm_configs}/swarm-compose.yml"
-    if [[ -f "$compose_example" ]]; then
-        if [[ "$dry_run" == 1 ]]; then
-            _log INFO "Would install example-compose.yml to ${csm_configs}/"
-            _log INFO "Would create local-compose.yml and swarm-compose.yml from template"
-        else
-            _install_file "$compose_example" "${csm_configs}/" "$mode_conf"
-            if [[ ! -f "$compose_local" || "$force_install" == 1 ]]; then
-                $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$compose_example" "$compose_local"
-            fi
-            if [[ ! -f "$compose_swarm" || "$force_install" == 1 ]]; then
-                $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode_conf" "$compose_example" "$compose_swarm"
-            fi
-            _log INFO "Created/Overwrote local and swarm compose templates"
-        fi
-    fi
+    done
 }
 
 _setup_network() {
-    local net_name="${CSM_NETWORK_NAME:-csm_network}"
+    local net_name="${CSM_NETWORK:-csm_network}"
     _log STEP "_setup_network: ensuring network '$net_name' exists..."
 
     # Determine binary based on detected runtime
@@ -1024,8 +882,8 @@ _setup_network() {
 _setup_symlinks() {
     _log STEP "_setup_symlinks: checking and creating symlinks"
     local links=(
-        "${HOME}/stacks:${CSM_ROOT_DIR}"
-        "/usr/local/bin/csm:${CSM_CONFIGS_DIR}/csm.sh"
+        "${HOME}/stacks:${csm_dir}"
+        "/usr/local/bin/csm:${csm_configs}/${CSM_CORE_FILE}"
     )
 
     for link_spec in "${links[@]}"; do
@@ -1093,9 +951,9 @@ _uninstall_csm() {
     _log WARN "Starting CSM ${red}un${ylw}installation..."
     _log INFO "This will remove the core script and symlinks."
     if [[ "$force_uninstall" == 0 ]]; then
-        _log INFO "Your stacks, user.conf, and templates will NOT be modified."
+        _log INFO "Your stacks, ${CSM_CONF_FILE}, and templates will NOT be modified."
     else
-        _log INFO "Your stacks will not be touched, but user.conf and templates, will be removed."
+        _log INFO "Your stacks will not be touched, but ${CSM_CONF_FILE} and templates, will be removed."
     fi
 
     _confirm_yes "Proceed with uninstallation?" || { _log INFO "Cancelled."; exit 0; }
@@ -1124,41 +982,42 @@ _uninstall_csm() {
     fi
 
     # Remove Core Engine Files
-    if [[ -f "${csm_configs}/csm.sh" ]]; then
+    if [[ -f "${csm_configs}/${CSM_CORE_FILE}" ]]; then
         if [[ "$dry_run" == 1 ]]; then
-            _log INFO "Would remove: ${csm_configs}/csm.sh"
+            _log INFO "Would remove: ${csm_configs}/${CSM_CORE_FILE}"
         else
-            _log STEP "Removing core script: ${csm_configs}/csm.sh"
-            $var_sudo rm -f "${csm_configs}/csm.sh"
+            _log STEP "Removing core script: ${csm_configs}/${CSM_CORE_FILE}"
+            $var_sudo rm -f "${csm_configs}/${CSM_CORE_FILE}"
         fi
     else
-        _log INFO "File ${csm_configs}/csm.sh does not exist"
-    fi
-
-    if [[ -f "${csm_configs}/csm.ini" ]]; then
-        if [[ "$dry_run" == 1 ]]; then
-            _log INFO "Would remove: ${csm_configs}/csm.ini"
-        else
-            _log STEP "Removing default config: ${csm_configs}/csm.ini"
-            $var_sudo rm -f "${csm_configs}/csm.ini"
-        fi
-    else
-        _log INFO "File ${csm_configs}/csm.ini does not exist"
+        _log INFO "File ${csm_configs}/${CSM_CORE_FILE} does not exist"
     fi
 
     # Remove user config and templates if force mode
     if [[ "$force_install" == 1 ]]; then
         _log WARN "Force mode: Removing user config and templates."
-        for file in "${csm_configs}/user.conf" "${csm_configs}/example.env" "${csm_configs}/local-compose.yml" "${csm_configs}/swarm-compose.yml" "${csm_configs}/.local.env" "${csm_configs}/.swarm.env"; do
-            if [[ -f "$file" ]]; then
+        # Remove config files
+        for file in "${file_list[@]}"; do
+            filename="${csm_configs}/${file}"
+            if [[ -f "$filename" ]]; then
                 if [[ "$dry_run" == 1 ]]; then
-                    _log INFO "Would remove: $file"
+                    _log INFO "Would remove: $filename"
                 else
-                    _log STEP "Removing: $file"
-                    $var_sudo rm -f "$file"
+                    _log STEP "Removing: $filename"
+                    $var_sudo rm -f "$filename"
                 fi
             fi
         done
+        # Remove user config
+        user_conf="${csm_configs}/${CSM_CONF_FILE}"
+        if [[ -f "$user_conf" ]]; then
+            if [[ "$dry_run" == 1 ]]; then
+                _log INFO "Would remove: $user_conf"
+            else
+                _log STEP "Removing: $user_conf"
+                $var_sudo rm -f "$user_conf"
+            fi
+        fi
     fi
 
     if [[ "$dry_run" != 1 ]]; then
@@ -1170,12 +1029,12 @@ _uninstall_csm() {
 
 _install_csm() {
     _log INFO "Container Stack Manager v${CSM_VERSION} - installer starting"
-    _log INFO "Invoking user: ${csm_owner} (UID ${csm_uid})"
-    _log INFO "Install path: ${csm_dir}"
-
     if [[ "$force_install" == 1 ]]; then
         _log WARN "FORCE MODE ACTIVE: Existing configs will be overwritten and prompts bypassed."
     fi
+    _log INFO "Invoking user: ${csm_owner} (UID ${csm_uid})"
+    _log INFO "Install path: ${csm_dir}"
+
 
     _detect_pkg_manager
     _create_group
@@ -1267,6 +1126,20 @@ main() {
         esac
     done
 
+    # Create lockfile after parsing args (skip for dry-run)
+    if [[ "$dry_run" != "1" ]]; then
+        LOCKFILE="/var/lock/csm-install.lock"
+        if ! command -v flock >/dev/null 2>&1; then
+            echo "WARNING: flock not found - install util-linux or coreutils for safety." >&2
+            exit 1
+        fi
+        exec 200>"$LOCKFILE"
+        if ! flock -n 200; then
+            echo "Another instance of csm-install.sh is already running." >&2
+            exit 1
+        fi
+    fi
+
     # Set up variables
     _vars_setup
 
@@ -1280,7 +1153,7 @@ main() {
         _log PASS "CSM installation complete!"
         echo ""
         _log INFO "Next steps:"
-        _log INFO "  1. Edit csm.ini defaults or user.conf : ${csm_configs}/"
+        _log INFO "  1. Edit user.conf : ${csm_configs}/"
         _log INFO "  2. View your stacks : ${csm_dir}/"
         _log INFO "  3. Get started      : csm --help"
         # Check if the invoking user is in the container group (for logout reminder)

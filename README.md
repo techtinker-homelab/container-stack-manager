@@ -73,7 +73,7 @@ Docker or Podman will be detected automatically, or you can choose which to inst
    2. Check / start the container service
    3. Create a runtime group (`docker` or `podman`) at GID 2000 (if absent) and add your user to it
    4. Build the directory structure under `CSM_ROOT_DIR`
-   5. Copy core files (`csm.sh`, `csm.ini`) and set permissions
+   5. Copy core files (`csm.sh`) and set permissions
    6. Create the `~/stacks` convenience symlink
    7. Symlink `csm` into `/usr/local/bin`
 
@@ -93,9 +93,9 @@ Docker or Podman will be detected automatically, or you can choose which to inst
 ### Repository (Pre-install)
 ```
 ./<repo>/
-├── csm.sh              ← Main runtime script (symlinked to /usr/local/bin/csm during install)
+├── csm.sh              ← Main runtime script, symlinked to /usr/local/bin/csm
 ├── csm-install.sh      ← One-shot installer (run once; sets up the environment)
-├── csm.ini             ← Default configuration values
+├── example.yml         ← Example compose config file
 ├── example.env         ← Example environment template
 └── README.md           ← This file
 ```
@@ -110,23 +110,21 @@ By default, CSM installs everything to `/srv/stacks` (accessible via `~/stacks` 
 │       └── <stack>-YYYYMMDD_HHMMSS.tar.gz
 ├── .configs/                    ← Shared resources and tools
 │   ├── csm.sh                   ← Main CSM script
-│   ├── csm.ini                  ← Default configuration values
-│   ├── user.conf                ← User overrides (optional)
-│   ├── local-compose.yml        ← Compose template for local/Podman
-│   ├── swarm-compose.yml        ← Compose template for Docker Swarm
-│   ├── .local.env               ← Environment variables for local mode
-│   └── .swarm.env               ← Environment variables for swarm mode
+│   ├── local.env                ← Environment variables for local scoped containers
+│   ├── swarm.env                ← Environment variables for swarm scoped containers
+│   ├── local.yml                ← Compose template for local/Podman
+│   ├── swarm.yml                ← Compose template for Docker Swarm scoped containers
+│   ├── local.env                ← Environment variables for local scoped containers
+│   └── user.conf                ← User configuration values
 ├── .secrets/                    ← Secrets and environment variable templates
-│   ├── .local.env               ← Local mode environment variables
-│   ├── .swarm.env               ← Swarm mode environment variables
-│   ├── example.env              ← Bare bones example .env variables
 │   └── <variable_name>.secret   ← Secret file per secret variable
 ├── .modules/                    ← Pre-configured stack templates (feature still in development)
 └── <stack>/                     ← Individual stack directories
     ├── .env                     ← Stack-specific environment variables
     ├── .local or .swarm         ← Scope marker file
-    ├── compose.yml              ← Stack containers configuration
-    └── appdata/                 ← Container data directories
+    ├── certs/                   ← Certificate files if used by the container
+    ├── appdata/                 ← Container data/config directories
+    └── compose.yml              ← Stack containers configuration
 ```
 
 ---
@@ -205,10 +203,9 @@ csm <command> [<stack-name>] [options]
 |---|---|---|
 | `list` | `l`, `ls` | List all stacks with running state and scope |
 | `status <stack>` | `s` | Show container/service status |
-| `validate <stack>` | `v` | Validate `compose.yml` syntax |
+| `verify <stack>` | `v` | Validate `compose.yml` syntax |
 | `inspect <stack>` | `i` | Inspect stack configuration |
 | `logs <stack> [n]` | `g` | Follow logs (default: last 50 lines) |
-| `cd <stack>` | | Print the stack directory path |
 | `ps` | | List all containers (formatted, colorized) |
 | `net <action>` | | Network info: `host`, `inspect [name]`, `list` |
 | `module` | `m` | Module management (not yet implemented) |
@@ -250,12 +247,12 @@ Some helpful shell aliases:
 
 | Alias | Description |
 |---|---|
-| `cds <stack>` | cd into stack directory |
+| `cds [stack]` | cd into CSM root directory (`$CSM_ROOT_DIR`) |
 | `hostip` | Show host public IP |
-| `lancheck <container>` | Show container IP via ipinfo.io |
-| `vpncheck <container>` | Show container IP + host IP side-by-side |
-| `keygen [number:-32]` | Generates random value using "openssl rand -hex ## (32 is default) |
-| `ctupd <container>` | Updates container using nicholas-fedor's Watchtower fork. |
+| `lanip <container>` | Show container IP via ipinfo.io |
+| `vpnip <container>` | Show container IP + host IP side-by-side |
+| `genkey [number]` | Generates random value using "openssl rand -hex ## (32 is default) |
+| `wtup <container>` | Updates container using nicholas-fedor's Watchtower fork. |
 
 ```bash
 eval "$(csm --aliases)"
@@ -283,8 +280,8 @@ Use `.swarm` or `.local` marker files to force a specific scope when needed.
 
 Configuration values are loaded in this order (later sources override earlier):
 
-1. **`csm.ini`** — Default values (installed to `CSM_ROOT_DIR/.configs/`)
-2. **`user.conf`** — User overrides (create via `csm config edit`)
+1. **Defaults** — Built-in default values
+2. **`user.conf`** — User configuration (created during install)
 3. **Environment variables** — `CSM_*` prefix takes highest precedence
 
 Edit with `csm config edit` or manually edit `CSM_ROOT_DIR/.configs/user.conf`.
@@ -293,20 +290,25 @@ Edit with `csm config edit` or manually edit `CSM_ROOT_DIR/.configs/user.conf`.
 
 | Variable | Default Value | Description |
 |---|---|---|
-| `CSM_VERSION` | (from csm.ini) | CSM version |
-| `CSM_CONTAINER_RUNTIME` | (auto-detect) | `docker` or `podman` |
-| `CSM_STACKS_UID` | 1000 | UID for stack directory ownership |
-| `CSM_STACKS_GID` | 2000 | GID for stack directory ownership |
-| `CSM_ROOT_DIR` | `/srv/stacks` | Base install directory |
-| `CSM_BACKUPS_DIR` | `$CSM_ROOT_DIR/.backups` | Backup archive location |
-| `CSM_CONFIGS_DIR` | `$CSM_ROOT_DIR/.configs` | Config files location |
-| `CSM_MODULES_DIR` | `$CSM_ROOT_DIR/.modules` | Modules location |
-| `CSM_SECRETS_DIR` | `$CSM_ROOT_DIR/.secrets` | Secrets backup location |
-| `CSM_NETWORK_NAME` | `csm_network` | Default external network |
-| `CSM_NETWORK_SUBNET` | `172.20.0.0/16` | Network subnet (optional) |
-| `CSM_VOLUME_DRIVER` | `local` | Volume driver |
+| `CSM_VERSION` | 0.5.0 | CSM version |
+| `CSM_RUNTIME` | (auto-detect) | `docker` or `podman` |
+| `CSM_UID` | (current user) | UID for stack directory ownership |
+| `CSM_GID` | 2000 | GID for stack directory ownership |
+| `CSM_DIR` | `/srv/stacks` | Base install directory |
+| `CSM_BACKUPS` | `${CSM_DIR}/.backups` | Backup archive location |
+| `CSM_CONFIGS` | `${CSM_DIR}/.configs` | Config files location |
+| `CSM_SECRETS` | `${CSM_DIR}/.secrets` | Secrets backup location |
+| `CSM_TEMPLATES` | `${CSM_DIR}/.templates` | Templates location |
+| `CSM_NETWORK` | `external_edge` | Default external network |
+| `CSM_NET_CIDR` | `172.20.0.0/16` | Network subnet |
+| `CSM_VOLUME_SCOPE` | `local` | Volume scope |
+| `CSM_VOLUME_LABEL` | `csm_volume` | Volume label |
 | `CSM_BACKUP_MAX_AGE` | 30 | Backup retention (days) |
 | `CSM_BACKUP_COMPRESSION` | `zip` | Backup compression format |
+| `CSM_ENV_LOCAL` | `local.env` | Local environment file |
+| `CSM_ENV_SWARM` | `swarm.env` | Swarm environment file |
+| `CSM_YML_LOCAL` | `local.yml` | Local compose file |
+| `CSM_YML_SWARM` | `swarm.yml` | Swarm compose file |
 
 ---
 
