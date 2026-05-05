@@ -50,7 +50,6 @@ csm_cmd=""    # set by _detect_runtime
 scope=""      # set by _detect_scope
 
 # Permission modes (symbolic form — compatible with GNU and BSD install)
-readonly mode_dirs="770"   # directories:  rwxrwx---
 readonly mode_exec="770"   # executables:  rwxrwx---
 readonly mode_conf="660"   # config files: rw-rw----
 readonly mode_auth="600"   # secrets:      rw-------
@@ -445,7 +444,7 @@ stack_create() {
     if [[ -d "$stack_dir" ]]; then _log EXIT "Stack '$stack_name' already exists at $stack_dir"; fi
 
     _log STEP "stack_create: creating directories..."
-    install -o "$csm_uid" -g "$csm_gid" -m "$mode_dirs" -d "$stack_dir"
+    install -o "$csm_uid" -g "$csm_gid" -m "$mode_exec" -d "$stack_dir"
 
     local reverse_proxy_list=(
         traefik
@@ -929,7 +928,41 @@ stack_info() {
         logs)
             case "$scope" in
                 local) "$csm_cmd" compose -f "$file" logs -f --tail="$lines" ;;
-                swarm) docker service logs --tail "$lines" -f "$stack_name" ;;
+                swarm)
+                    # Check if stack_name is a valid service name
+                    if docker service inspect "$stack_name" >/dev/null 2>&1; then
+                        docker service logs --tail "$lines" -f "$stack_name"
+                    else
+                        # Stack name not a service, show menu of services in the stack
+                        local services=()
+                        while IFS= read -r svc; do
+                            services+=("$svc")
+                        done < <(docker service ls --filter "name=$stack_name" --format "{{.Name}}" 2>/dev/null)
+
+                        if [[ ${#services[@]} -eq 0 ]]; then
+                            _log EXIT "No services found for stack '$stack_name'"
+                        fi
+
+                        _log INFO "Available services in stack '$stack_name':"
+                        for i in "${!services[@]}"; do
+                            printf "  %d) %s\n" "$((i+1))" "${services[$i]}"
+                        done
+
+                        local choice=""
+                        read -r -p "Enter service number (or press Enter to cancel): " choice
+                        if [[ -n "$choice" && "$choice" =~ ^[0-9]+$ ]]; then
+                            local index=$((choice-1))
+                            if [[ $index -ge 0 && $index -lt ${#services[@]} ]]; then
+                                _log INFO "Showing logs for: ${services[$index]}"
+                                docker service logs --tail "$lines" -f "${services[$index]}"
+                            else
+                                _log WARN "Invalid selection"
+                            fi
+                        else
+                            _log INFO "Cancelled"
+                        fi
+                    fi
+                    ;;
             esac
             ;;
         *) _log EXIT "Unknown info operation: $action" ;;
@@ -959,7 +992,10 @@ stack_list() {
     _log STEP "stack_list: csm_dir=$csm_dir"
     if [[ ! -d "$csm_dir" ]]; then _log EXIT "Stacks directory not found: $csm_dir"; fi
 
-    _log STEP "stack_list: swarm_active=$swarm_active"
+    if $swarm_active; then
+        swarm_stacks="$(_get_swarm_stacks)"
+        _log STEP "stack_list: updated swarm_stacks with $(echo "$swarm_stacks" | wc -l) stacks"
+    fi
 
     local -a valid_stacks=()
     local -a empty_dirs=()
@@ -977,9 +1013,9 @@ stack_list() {
     done < <(find "$csm_dir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print0 | sort -z)
 
     if [[ ${#valid_stacks[@]} -gt 0 ]]; then
-        _log INFO "Active stacks in ${csm_dir}:"
+        local data=""
         for dir_name in "${valid_stacks[@]}"; do
-            local stack_dir scope status_label status_color
+            local stack_dir scope status_label status_color colored_name colored_status colored_scope
             stack_dir="${csm_dir}/${dir_name}"
 
             # Determine scope
@@ -1004,23 +1040,32 @@ stack_list() {
                 fi
             fi
 
-            printf "  %s%-24s%s [%s%s%s] %s%s%s\n" \
-                "${cyn}" "$dir_name" "${rst}" \
-                "${status_color}" "$status_label" "${rst}" \
-                "${blu}" "$scope" "${rst}"
+            # Color the fields
+            colored_name="${cyn}${dir_name}${rst}"
+            colored_status="${status_color}${status_label}${rst}"
+            colored_scope="${blu}${scope}${rst}"
+
+            # Add to data
+            data+="${colored_name}\t${colored_status}\t${colored_scope}\n"
         done
+
+        # Format as table
+        _format_tabular_data "STACK\tSTATUS\tSCOPE" "printf '%b' \"$data\""
     else
         _log WARN "No valid stacks found in $csm_dir"
     fi
 
     if [[ ${#empty_dirs[@]} -gt 0 ]]; then
         echo ""
-        _log WARN "Directories missing a compose file (empty or broken):"
+        local empty_data=""
         for dir_name in "${empty_dirs[@]}"; do
-            printf "  %s%-24s%s [ %s%s%s ]\n" \
-                "${wht}" "$dir_name" "${rst}" \
-                "${red}" "empty" "${rst}"
+            local colored_name colored_status
+            colored_name="${wht}${dir_name}${rst}"
+            colored_status="${red}empty${rst}"
+            empty_data+="${colored_name}\t${colored_status}\n"
         done
+        _log WARN "Directories missing a compose file (empty or broken):"
+        _format_tabular_data "DIRECTORY\tSTATUS" "printf '%b' \"$empty_data\""
     fi
 }
 
@@ -1193,10 +1238,10 @@ _print_aliases() {
 # Source this in your shell rc:  eval "\$(csm --aliases)"
 
 # Check host and container IPs
-hostip() { echo "Host IP: \$(curl -fsSL ifconfig.me 2>/dev/null || wget -qO- ifconfig.me)"; }
-lanip() { echo "Container IP: \$(${csm_cmd} container exec -it "\${1}" curl -fsSL ipinfo.io 2>/dev/null || wget -qO- ipinfo.io)"; }
-vpnip() { echo "Container IP: \$(${csm_cmd} container exec -it "\${1}" curl -fsSL ipinfo.io/ip 2>/dev/null || wget -qO- ipinfo.io/ip)" && \\
-            echo "     Host IP: \$(curl -fsSL ifconfig.me 2>/dev/null || wget -qO- ifconfig.me)"; }
+hostip() { echo "Host IP: \$(curl -fsSL http://ifconfig.me 2>/dev/null || wget -qO- http://ifconfig.me)"; }
+lanip() { echo "Container IP: \$(${csm_cmd} container exec -it "\${1}" curl -fsSL http://ipinfo.io 2>/dev/null || wget -qO- http://ipinfo.io)"; }
+vpnip() { echo "Container IP: \$(${csm_cmd} container exec -it "\${1}" curl -fsSL http://ipinfo.io/ip 2>/dev/null || wget -qO- http://ipinfo.io/ip)" && \\
+            echo "     Host IP: \$(curl -fsSL http://ifconfig.me 2>/dev/null || wget -qO- http://ifconfig.me)"; }
 # Create encryption key
 genkey() { openssl rand -hex \${1:-32}; }
 wtup() {
