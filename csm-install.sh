@@ -67,11 +67,11 @@ fi
 # NOTE: Change these to work on your intended container host
 var_defaults() {
     # Container runtime (docker or podman, leave blank to choose during installation)
-    CSM_RUNTIME="${CSM_RUNTIME:-}"
+    CSM_RUNTIME="${CSM_RUNTIME:-docker}"
 
     # Stacks group and user (blank so current user id is used)
     CSM_GID="${CSM_GID:-2000}"
-    CSM_UID="${CSM_UID:-}"
+    CSM_UID="${CSM_UID:-${SUDO_UID:-$(id -u)}}"
 
     # Root directory for all stack files
     CSM_DIR="${CSM_DIR:-/srv/stacks}"
@@ -405,6 +405,37 @@ _user_input() {
         _log STEP "All values reset to defaults"
     fi
 
+    # Prompt for blank configuration values
+    _log STEP "Checking for blank configuration values..."
+    # local blank_count=0
+    for var in "${csm_var_prompt[@]}"; do
+        if [[ -z "${!var}" ]]; then
+            # ((blank_count++))
+            cur=""
+            # Provide suggested defaults for blank values
+            # case "$var" in
+            #     CSM_RUNTIME) cur="docker" ;;
+            #     CSM_UID) cur="${SUDO_UID:-$(id -u)}" ;;
+            # esac
+            while read -r -p "Required variable \'${var}\' is blank, enter a value: " new; do
+                case "${input:-}" in
+                    "") echo -e " > invalid input <"; return 1; ;;
+                    *) return 0; ;;
+                esac
+            done
+
+            if [[ -n "$new" ]]; then new="$(_sanitize_input "$new")"
+            elif [[ -n "$cur" ]]; then new="$cur"
+            fi
+            if [[ -n "$new" ]]; then declare "$var=$new"; _log STEP "Set ${var}=${new}"; fi
+        fi
+    done
+    # if [[ $blank_count -gt 0 ]]; then
+    #     _log STEP "Configured $blank_count blank values"
+    # else
+    #     _log STEP "All configuration values are set"
+    # fi
+
     if _confirm_no "Do you want to manually edit any of the configuration values?"; then
         _log STEP "Press ENTER to keep the current value in brackets."
         local var cur new updated=0
@@ -421,13 +452,14 @@ _user_input() {
                 updated=$((updated + 1))
             fi
         done
-        # Write all CSM_* variables to ${CSM_CONF_FILE}
-        : > "$user_conf"
-        for var in "${csm_var_order[@]}"; do
-            echo "${var}=${!var}" >> "$user_conf"
-        done
-        _log STEP "Updated ${updated} values in ${CSM_CONF_FILE}"
+        _log STEP "Updated ${updated} values"
     fi
+
+    # Write all CSM_* variables to ${CSM_CONF_FILE}
+    : > "$user_conf"
+    for var in "${csm_var_order[@]}"; do
+        echo "${var}=${!var}" >> "$user_conf"
+    done
 }
 
 # =============================================================================
@@ -810,6 +842,22 @@ _setup_files() {
             _install_file "$src_file" "${csm_configs}" "$file_mode"
         fi
     done
+
+    # Ensure user.conf exists with current values
+    local user_conf="${csm_configs}/user.conf"
+    if [[ ! -f "$user_conf" ]]; then
+        if [[ "$dry_run" == 1 ]]; then
+            _log INFO "Would create user.conf in ${csm_configs}"
+        else
+            _log STEP "Creating user.conf with current values"
+            for var in "${csm_var_order[@]}"; do
+                echo "${var}=${!var}" >> "$user_conf"
+            done
+            chown "${csm_uid}:${csm_gid}" "$user_conf"
+            chmod "$mode_conf" "$user_conf"
+            _log STEP "Created user.conf with current values"
+        fi
+    fi
 }
 
 _setup_network() {

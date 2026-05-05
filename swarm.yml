@@ -1,0 +1,27 @@
+# 'dozzle' docker compose created to work with - https://gitlab.com/techtinker/container-stack-manager
+
+networks:
+  external_edge:
+    external: true
+
+services:
+  app:
+    image: amir20/dozzle
+    container_name: dozzle
+    restart: always
+    networks:
+      - external_edge
+    ports:
+      - 9999:8080
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      username: username
+      password: password
+    # labels:
+    #   traefik.enable: "true"
+    #   traefik.http.routers.dozzle.entrypoints: webnonsec
+    #   traefik.http.routers.dozzle.tls.certresolver: letsencrypt
+    #   traefik.http.routers.dozzle.rule: Host(`dozzle.${var_domain1}`)
+    #   traefik.http.routers.dozzle.service: dozzle
+    #   traefik.http.services.dozzle.loadbalancer.server.port: "8080"
