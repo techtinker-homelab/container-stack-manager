@@ -908,8 +908,24 @@ stack_info() {
     if [[ "$action" == "status" ]]; then stack_ps "$stack_name"; return; fi
 
     _require_name "$stack_name"
-    file="$(_require_compose "$stack_name")"
-    _detect_scope "$stack_name"
+    case "$action" in
+        logs)
+            # For logs, handle service names directly for swarm
+            if docker service inspect "$stack_name" >/dev/null 2>&1; then
+                scope="swarm"
+                file=""  # No compose file needed for direct service logs
+            else
+                file="$(_require_compose "$stack_name")"
+                _detect_scope "$stack_name"
+            fi
+            ;;
+        *)
+            file="$(_require_compose "$stack_name")"
+            _detect_scope "$stack_name"
+            ;;
+    esac
+
+    # Continue with action-specific logic
     case "$action" in
         verify)
             case "$scope" in
@@ -985,8 +1001,31 @@ _compose_config () {
 _format_tabular_data() {
     local header="$1"
     local data_command="$2"
-    { printf "%s%s%s\n" "${bld}" "$header" "${rst}"; eval "$data_command"; } | column -ts $'\t'
+    # Convert \t sequences in header to actual tabs for column alignment
+    local header_with_tabs="${header//\\t/$'\t'}"
+    { printf "%s\n" "$header_with_tabs"; eval "$data_command"; } | column -ts $'\t' | sed -E "
+        1 s/^.*$/${bld}&${rst}/                     # Bold Header
+        2,\$ {
+            s/\b(running)\b/${grn}&${rst}/g         # Color 'running' Green
+            s/\b(stopped)\b/${ylw}&${rst}/g         # Color 'stopped' Yellow
+            s/^(local)(\s|$)/${blu}&/g              # Color local scope Blue
+            s/^(swarm)(\s|$)/${cyn}&/g              # Color swarm scope Cyan
+            s/\b(unhealthy)\b/${red}&${rst}/g       # Color 'unhealthy' Red FIRST
+            s/\b(healthy)\b/${grn}&${rst}/g         # Color 'healthy' Green (only whole word)
+            s/^(missing)(\s|$)/${red}&/g            # Color 'missing' Red
+            s/^([^ ]+)/${blu}&/                     # Color first column Blue
+            s/^([^ ]+ +)([^ ]+)/\1${mgn}\2${rst}/   # Color Name (Col 2) Magenta
+        }
+    "
 }
+# _format_tabular_data() {
+#     local header="$1"
+#     local data_command="$2"
+#     # Strip ANSI codes for column width calculation, then reapply them
+#     { printf "%s%s%s\n" "${bld}" "$header" "${rst}"; eval "$data_command"; } | {
+#         sed -r 's/\x1B\[[0-9;]*[mK]//g' | column -ts $'\t' | sed -r 's/\x1B\[[0-9;]*[mK]//g'
+#     }
+# }
 
 stack_list() {
     _log STEP "stack_list: csm_dir=$csm_dir"
@@ -1013,9 +1052,13 @@ stack_list() {
     done < <(find "$csm_dir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print0 | sort -z)
 
     if [[ ${#valid_stacks[@]} -gt 0 ]]; then
+        # Precompute running local projects to avoid per-stack subprocesses
+        local running_projects=""
+        running_projects="$($csm_cmd ps --filter status=running --format "{{.Labels}}" 2>/dev/null | grep -o 'com\.docker\.compose\.project=[^,]*' | cut -d= -f2 | sort | uniq | tr '\n' ' ')"
+
         local data=""
         for dir_name in "${valid_stacks[@]}"; do
-            local stack_dir scope status_label status_color colored_name colored_status colored_scope
+            local stack_dir scope ports status_label
             stack_dir="${csm_dir}/${dir_name}"
 
             # Determine scope
@@ -1028,29 +1071,53 @@ stack_list() {
             # Determine status
             if [[ "$scope" == "swarm" ]]; then
                 if <<<"$swarm_stacks" grep -qw "$dir_name"; then
-                    status_color="${grn}"; status_label="deployed"
+                    status_label="running"
                 else
-                    status_color="${ylw}"; status_label="stopped"
+                    status_label="stopped"
                 fi
             else
-                if "$csm_cmd" compose -f "${stack_dir}/compose.yml" ps --services --filter status=running 2>/dev/null | grep -q .; then
-                    status_color="${grn}"; status_label="running"
+                if [[ " $running_projects " == *" $dir_name "* ]]; then
+                    status_label="running"
                 else
-                    status_color="${ylw}"; status_label="stopped"
+                    status_label="stopped"
                 fi
             fi
 
-            # Color the fields
-            colored_name="${cyn}${dir_name}${rst}"
-            colored_status="${status_color}${status_label}${rst}"
-            colored_scope="${blu}${scope}${rst}"
+            # Determine ports
+            if [[ "$scope" == "swarm" ]]; then
+                ports="$(docker service ls --filter name="$dir_name" --format "{{.Ports}}" 2>/dev/null | sed 's/0\.0\.0\.0://g; s/\[::\]://g; s/\*://g' | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')"
+            else
+                ports="$("$csm_cmd" compose -f "${stack_dir}/compose.yml" ps --format "{{.Ports}}" 2>/dev/null | sed 's/0\.0\.0\.0://g; s/\[::\]://g; s/\*://g' | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')"
+            fi
+
+            # Plain fields
+            local name="$dir_name"
+            local status="$status_label"
+            local scope_field="$scope"
+            local ports_field="$ports"
 
             # Add to data
-            data+="${colored_name}\t${colored_status}\t${colored_scope}\n"
+            data+="${scope_field}"$'\t'"${name}"$'\t'"${status}"$'\t'"${ports_field}"$'\n'
+        done
+
+        # Get all compose projects
+        local all_projects=""
+        all_projects="$($csm_cmd compose ls --all --format json 2>/dev/null | jq -r '.[]?.Name // empty' 2>/dev/null || $csm_cmd compose ls --format 'table {{.Name}}' 2>/dev/null | tail -n +2 || echo "")"
+
+        # Add unmanaged projects
+        for proj in $all_projects; do
+            if [[ " ${valid_stacks[*]} " != *" $proj "* ]]; then
+                scope="local (unmanaged)"
+                status_label="unknown"
+                ports=""
+                name="$proj"
+                data+="${scope}"$'\t'"${name}"$'\t'"${status_label}"$'\t'"${ports}"$'\n'
+            fi
         done
 
         # Format as table
-        _format_tabular_data "STACK\tSTATUS\tSCOPE" "printf '%b' \"$data\""
+        # _format_tabular_data "SCOPE\tSTACK\tSTATUS\tPORTS" "printf '%s' \"$data\""
+        _format_tabular_data "SCOPE"$'\t'"NAME"$'\t'"STATUS"$'\t'"PORTS"  "printf '%s' \"$data\""
     else
         _log WARN "No valid stacks found in $csm_dir"
     fi
@@ -1059,13 +1126,10 @@ stack_list() {
         echo ""
         local empty_data=""
         for dir_name in "${empty_dirs[@]}"; do
-            local colored_name colored_status
-            colored_name="${wht}${dir_name}${rst}"
-            colored_status="${red}empty${rst}"
-            empty_data+="${colored_name}\t${colored_status}\n"
+            empty_data+="missing"$'\t'"${csm_dir}/${dir_name}"$'\n'
         done
         _log WARN "Directories missing a compose file (empty or broken):"
-        _format_tabular_data "DIRECTORY\tSTATUS" "printf '%b' \"$empty_data\""
+        _format_tabular_data "STATUS\tDIRECTORY" "printf '%s' \"$empty_data\""
     fi
 }
 
@@ -1075,10 +1139,10 @@ stack_ps() {
 
     if [[ -n "$stack_name" ]]; then
         # Per-stack ps: route based on scope
-        local file="$(_require_compose "$stack_name")"
         _detect_scope "$stack_name"
         case "$scope" in
             local)
+                local file="$(_require_compose "$stack_name")"
                 "$csm_cmd" compose -f "$file" ps
                 ;;
             swarm)
@@ -1091,13 +1155,12 @@ stack_ps() {
 
     # All containers
     _format_tabular_data "CONTAINER ID"$'\t'"NAME"$'\t'"STATUS"$'\t'"PORTS" \
-        '"$csm_cmd" ps --all --format "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}" | sort -k2,2 | sed -E "
-            s/^([^ \t]+)\t([^ \t]+)\t([^ \t]+)\t(.+)/\1\t${cyn}\2${rst}\t\3\t\4/
-            s/0\.0\.0\.0://g; s/\[::\]://g; s/->.*\/\w+//g; s/, //g
-            s/unhealthy/${red}unhealthy${rst}/g
-            s/healthy/${grn}healthy${rst}/g
-            s/([0-9]+\/\w+)/${blu}\1${rst}/g
-        "'
+        '"$csm_cmd" ps --all --format "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}" | sort -k2,2 | awk '\''BEGIN { FS="\t"; OFS="\t" } {
+            gsub(/0\.0\.0\.0:/, "", $4)
+            gsub(/, *\[::\]:[^ ]*/, "", $4)
+            gsub(/\*:/, "", $4)
+            print $1, $2, $3, $4
+        }'\'
 
     # # TODO: Needs testing; while loops are slower than `sed` but more portable.
     # while IFS=$'\t' read -r id name status ports; do
@@ -1119,11 +1182,11 @@ stack_ps() {
         services="$(_get_swarm_stacks)"
         if [[ -n "$services" ]]; then
             echo ""
-            _log INFO "Swarm services:"
+            echo "${bld}SWARM STACKS${rst}"
             while IFS= read -r svc; do
-                printf "  %s%s%s\n" "${cyn}" "$svc" "${rst}"
+                printf "%s%s%s\n" "${mgn}" "$svc" "${rst}"
                 docker service ps "$svc" --no-trunc --format "table {{.Name}}\t{{.CurrentState}}\t{{.Node}}\t{{.DesiredState}}" 2>/dev/null | \
-                    tail -n +2 | sed 's/^/    /'
+                    tail -n +2 | sed 's/^/    /' || true
             done <<< "$services"
         fi
     fi
