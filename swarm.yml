@@ -1,23 +1,25 @@
 # 'dozzle' docker compose created to work with - https://gitlab.com/techtinker/container-stack-manager
 
 networks:
-  external_edge:
+  internal_only:
     external: true
 
 services:
   app:
-    image: amir20/dozzle
-    container_name: dozzle
-    restart: always
+    image: amir20/dozzle:latest
     networks:
-      - external_edge
+      - internal_only
     ports:
-      - 9999:8080
+      - 8888:8080
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/data
     environment:
+      DOZZLE_MODE: swarm
       username: username
       password: password
+    deploy:
+      mode: global
     # labels:
     #   traefik.enable: "true"
     #   traefik.http.routers.dozzle.entrypoints: webnonsec
