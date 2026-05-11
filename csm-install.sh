@@ -383,7 +383,10 @@ _user_input() {
 
     # Ensure ${CSM_CONF_FILE} exists with current values if not present
     local user_conf="${csm_user_conf}"
-    if [[ ! -f "$user_conf" ]]; then
+    local user_conf_existed=false
+    if [[ -f "$user_conf" ]]; then
+        user_conf_existed=true
+    else
         _log STEP "Creating ${CSM_CONF_FILE} with current values"
         mkdir -p "$(dirname "$user_conf")"
         for var in "${csm_var_order[@]}"; do
@@ -394,7 +397,7 @@ _user_input() {
         _log STEP "Created ${CSM_CONF_FILE} with current values"
     fi
 
-    if _confirm_no "Reset all values to defaults?"; then
+    if [[ "$user_conf_existed" == true ]] && _confirm_no "Reset all values to defaults?"; then
         _log STEP "_user_input: resetting to defaults"
         var_defaults
         # Write defaults to ${CSM_CONF_FILE}
@@ -471,6 +474,7 @@ _detect_pkg_manager() {
     elif command -v dnf     >/dev/null 2>&1; then pkg_mgr="dnf"
     elif command -v yum     >/dev/null 2>&1; then pkg_mgr="yum"
     elif command -v pacman  >/dev/null 2>&1; then pkg_mgr="pacman"
+    elif command -v slackpkg >/dev/null 2>&1; then pkg_mgr="slackpkg"
     else
         _log WARN "Unsupported package manager - install curl, git manually if needed."
         pkg_mgr=""
@@ -494,6 +498,11 @@ _install_pkg() {
         pacman)
             _log STEP "_install_pkg: running pacman -S --noconfirm $*"
             $var_sudo pacman -S --noconfirm "$@" ;;
+        slackpkg)
+            _log STEP "_install_pkg: running slackpkg update"
+            $var_sudo slackpkg update
+            _log STEP "_install_pkg: running slackpkg install $*"
+            $var_sudo slackpkg install "$@" ;;
     esac
 }
 
@@ -638,6 +647,9 @@ _check_service() {
     elif [[ -x /sbin/openrc-run ]] || [[ -f /etc/init.d/functions.sh ]]; then
         # OpenRC (Common on Devuan/Alpine)
         init_type="openrc"
+    elif [[ -f /etc/rc.d/rc.functions ]]; then
+        # Slackware init (used in Unraid)
+        init_type="slackware"
     elif [[ -f /etc/init.d/skeleton ]] || [[ -d /etc/init.d ]]; then
         # Traditional SysVinit
         init_type="sysvinit"
@@ -657,6 +669,10 @@ _check_service() {
             openrc)
                 [[ "$action" == "status" ]] && rc-service "$srv" status >/dev/null 2>&1 && return 0
                 [[ "$action" == "start" ]] && $var_sudo rc-service "$srv" start && return 0
+                ;;
+            slackware)
+                [[ "$action" == "status" ]] && /etc/rc.d/rc."$srv" status >/dev/null 2>&1 && return 0
+                [[ "$action" == "start" ]] && $var_sudo /etc/rc.d/rc."$srv" start && return 0
                 ;;
             sysvinit)
                 [[ "$action" == "status" ]] && service "$srv" status >/dev/null 2>&1 && return 0
