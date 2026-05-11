@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# csm-install.sh - Container Stack Manager Installer
+# install-csm.sh - Container Stack Manager Installer
 # =============================================================================
 
 set -euo pipefail
@@ -38,10 +38,11 @@ uninstall_mode=0
 # =============================================================================
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+    readonly script_path="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+    readonly script_file="$(basename "$0")"
 else
     echo "ERROR: This script must be executed directly, not sourced." >&2
-    echo "Run: bash csm-install.sh  (or ./csm-install.sh)" >&2
+    echo "Run: bash ${script_file}  (or ./${script_file})" >&2
     return 1 2>/dev/null || exit 1
 fi
 
@@ -325,7 +326,7 @@ _vars_setup() {
         CSM_TEMPLATE_UPDATE_INTERVAL="7"
     fi
     # Validate CSM_DIR: must be absolute and not in script directory
-    if [[ -n "${CSM_DIR}" && ("${CSM_DIR}" != /* || "${CSM_DIR}" == "${script_dir}"* || "${CSM_DIR}" == *"csm-install.sh"*) ]]; then
+    if [[ -n "${CSM_DIR}" && ("${CSM_DIR}" != /* || "${CSM_DIR}" == "${script_path}"* || "${CSM_DIR}" == *"${script_file}"*) ]]; then
         _log STEP "Invalid CSM_DIR: '${CSM_DIR}', using default: '/srv/stacks'"
         CSM_DIR="/srv/stacks"
     fi
@@ -853,7 +854,7 @@ _setup_files() {
             else
                 file_mode="$mode_conf"
             fi
-            src_file="${script_dir}/${file}"
+            src_file="${script_path}/${file}"
             if [[ ! -f "$src_file" ]]; then src_file="/dev/null"; fi
             _install_file "$src_file" "${csm_configs}" "$file_mode"
         fi
@@ -1120,7 +1121,7 @@ show_help() {
     cat <<EOF
 ${bld}Container Stack Manager (CSM) Installer v${CSM_VERSION}${rst}
 
-${bld}Usage:${rst} ${script_dir}/csm-install.sh [options]
+${bld}Usage:${rst} ${script_path}/${script_file} [options]
 
 ${bld}Options:${rst}
     -b | --debug        Enable debug output.
@@ -1131,10 +1132,10 @@ ${bld}Options:${rst}
     -V | --version      Show installer version.
 
 ${bld}Examples:${rst}
-    ${script_dir}/csm-install.sh -f          # Force install, skip prompts
-    ${script_dir}/csm-install.sh -d          # Dry run to see what would happen
-    ${script_dir}/csm-install.sh -fdx        # Force install, dry-run, debug
-    ${script_dir}/csm-install.sh --uninstall # Uninstall CSM
+    ${script_path}/${script_file} -f          # Force install, skip prompts
+    ${script_path}/${script_file} -d          # Dry run to see what would happen
+    ${script_path}/${script_file} -fdx        # Force install, dry-run, debug
+    ${script_path}/${script_file} --uninstall # Uninstall CSM
 
 ${bld}Container Stack Manager Installer version:${rst} ${ylw}${CSM_VERSION}${rst}
 EOF
@@ -1192,14 +1193,14 @@ main() {
 
     # Create lockfile after parsing args (skip for dry-run)
     if [[ "$dry_run" != "1" ]]; then
-        LOCKFILE="/var/lock/csm-install.lock"
+        LOCKFILE="/var/lock/install-csm.lock"
         if ! command -v flock >/dev/null 2>&1; then
             echo "WARNING: flock not found - install util-linux or coreutils for safety." >&2
             exit 1
         fi
         exec 200>"$LOCKFILE"
         if ! flock -n 200; then
-            echo "Another instance of csm-install.sh is already running." >&2
+            echo "Another instance of ${script_file} is already running." >&2
             exit 1
         fi
     fi
