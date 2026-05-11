@@ -1054,7 +1054,7 @@ stack_list() {
     if [[ ${#valid_stacks[@]} -gt 0 ]]; then
         # Precompute running local projects to avoid per-stack subprocesses
         local running_projects=""
-        running_projects="$($csm_cmd ps --filter status=running --format "{{.Labels}}" 2>/dev/null | grep -o 'com\.docker\.compose\.project=[^,]*' | cut -d= -f2 | sort | uniq | tr '\n' ' ')"
+        running_projects="$({ $csm_cmd ps --filter status=running --format "{{.Labels}}" | { grep -o 'com\.docker\.compose\.project=[^,]*' | cut -d= -f2 | sort | uniq | tr '\n' ' '; } ; } 2>/dev/null || echo "")"
 
         local data=""
         for dir_name in "${valid_stacks[@]}"; do
@@ -1076,7 +1076,13 @@ stack_list() {
                     status_label="stopped"
                 fi
             else
-                if [[ " $running_projects " == *" $dir_name "* ]]; then
+                # Check if compose file is valid first
+                if "$csm_cmd" compose -f "${stack_dir}/compose.yml" config >/dev/null 2>&1; then
+                    running_count="$({ "$csm_cmd" compose -f "${stack_dir}/compose.yml" ps --services --filter status=running | wc -l ; } 2>/dev/null || echo "0")"
+                else
+                    running_count="0"
+                fi
+                if [ "$running_count" -gt 0 ]; then
                     status_label="running"
                 else
                     status_label="stopped"
@@ -1085,9 +1091,9 @@ stack_list() {
 
             # Determine ports
             if [[ "$scope" == "swarm" ]]; then
-                ports="$(docker service ls --filter name="$dir_name" --format "{{.Ports}}" 2>/dev/null | sed 's/0\.0\.0\.0://g; s/\[::\]://g; s/\*://g' | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')"
+                ports="$({ docker service ls --filter name="$dir_name" --format "{{.Ports}}" | sed 's/0\.0\.0\.0://g; s/\[::\]://g; s/\*://g' | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//' ; } 2>/dev/null || echo "")"
             else
-                ports="$("$csm_cmd" compose -f "${stack_dir}/compose.yml" ps --format "{{.Ports}}" 2>/dev/null | sed 's/0\.0\.0\.0://g; s/\[::\]://g; s/\*://g' | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')"
+                ports="$({ "$csm_cmd" compose -f "${stack_dir}/compose.yml" ps --format "{{.Ports}}" | sed 's/0\.0\.0\.0://g; s/\[::\]://g; s/\*://g' | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//' ; } 2>/dev/null || echo "")"
             fi
 
             # Plain fields
@@ -1102,7 +1108,7 @@ stack_list() {
 
         # Get all compose projects
         local all_projects=""
-        all_projects="$($csm_cmd compose ls --all --format json 2>/dev/null | jq -r '.[]?.Name // empty' 2>/dev/null || $csm_cmd compose ls --format 'table {{.Name}}' 2>/dev/null | tail -n +2 || echo "")"
+        all_projects="$({ $csm_cmd compose ls --all --format json | jq -r '.[]?.Name // empty' ; } 2>/dev/null || { $csm_cmd compose ls --format 'table {{.Name}}' | tail -n +2 ; } 2>/dev/null || echo "")"
 
         # Add unmanaged projects
         for proj in $all_projects; do
