@@ -306,10 +306,10 @@ _setup_variables() {
     # Assign operation variables with defaults
     csm_gid="${CSM_GID:-$(_get_gid "${csm_cmd:-docker}")}"
     csm_uid="${CSM_UID:-$(_get_uid)}"
-    csm_group=$(_get_group "$csm_gid")
-    csm_owner=$(_get_owner "$csm_uid")
-    csm_network="${CSM_NETWORK:-csm_network}"
-    csm_version=${CSM_VERSION:-unknown}
+    csm_group="$(_get_group "$csm_gid")"
+    csm_owner="$(_get_owner "$csm_uid")"
+    csm_network="${CSM_NET_NAME:-csm_network}"
+    csm_version="${CSM_VERSION:-unknown}"
 }
 
 _ensure_perms() {
@@ -1008,6 +1008,7 @@ _format_tabular_data() {
         2,\$ {
             s/\b(running)\b/${grn}&${rst}/g         # Color 'running' Green
             s/\b(stopped)\b/${ylw}&${rst}/g         # Color 'stopped' Yellow
+            s/\b(Exited)\b/${ylw}&${rst}/g          # Color 'Exited' Yellow
             s/^(local)(\s|$)/${blu}&/g              # Color local scope Blue
             s/^(swarm)(\s|$)/${cyn}&/g              # Color swarm scope Cyan
             s/\b(unhealthy)\b/${red}&${rst}/g       # Color 'unhealthy' Red FIRST
@@ -1401,8 +1402,8 @@ main() {
         e|edit)             stack_edit              "$@" ;;
         r|rename)           stack_rename            "$@" ;;
         bu|backup)          stack_backup            "$@" ;;
-        dt|delete)          stack_delete            "$@" ;;
-        ls|list)            stack_list                   ;;
+        dt|rm|delete)       stack_delete            "$@" ;;
+        ls|l|list)          stack_list                   ;;
         rc|recreate)        stack_recreate          "$@" ;;
         xx|purge)           stack_purge             "$@" ;;
 
