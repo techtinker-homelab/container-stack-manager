@@ -1121,6 +1121,27 @@ EOF
 # =============================================================================
 
 main() {
+    # Create lockfile after parsing args (skip for dry-run)
+    if [[ "$dry_run" != "1" ]]; then
+        LOCKDIR="${LOCKDIR:-/run/lock}"
+        CSM_INSTALL_LOG="${CSM_INSTALL_LOG:-$ROOT_USER/.cache/csm/install.log}"
+        # Fallback to writable location if /var/lock isn't usable
+        if [[ ! -d "$LOCKDIR" || ! -w "$LOCKDIR" ]]; then
+            LOCKDIR="/tmp"
+        fi
+        LOCKFILE="$LOCKDIR/csm-install.lock"
+        if [[ ! -d "$LOCKDIR" ]]; then
+            mkdir -p "$LOCKDIR" 2>>"$CSM_INSTALL_LOG" || \
+            { echo "Cannot create lock dir: $LOCKDIR" >&2; exit 1; }
+        fi
+        exec 200>"$LOCKFILE" 2>>"$CSM_INSTALL_LOG" || \
+            { echo "Cannot open lockfile: $LOCKFILE" >&2; exit 1; }
+        if ! flock -n 200 2>>"$CSM_INSTALL_LOG"; then
+            echo "Another instance of the CSM Installer is already running." >&2
+            exit 1
+        fi
+    fi
+
     _color_setup
     _detect_os
 
@@ -1166,20 +1187,6 @@ main() {
         esac
     done
 
-    # Create lockfile after parsing args (skip for dry-run)
-    if [[ "$dry_run" != "1" ]]; then
-        LOCKFILE="/var/lock/install-csm.lock"
-        if ! command -v flock >/dev/null 2>&1; then
-            echo "WARNING: flock not found - install util-linux or coreutils for safety." >&2
-            exit 1
-        fi
-        exec 200>"$LOCKFILE"
-        if ! flock -n 200; then
-            echo "Another instance of ${script_file} is already running." >&2
-            exit 1
-        fi
-    fi
-
     # Set up variables
     _vars_setup
 
@@ -1203,6 +1210,7 @@ main() {
             _log WARN "Remember to log out and back in so your $csm_group group membership takes effect."
         fi
     fi
+    trap 'flock -u 200; exec 200>&-; exit' EXIT
 }
 
 main "$@"
