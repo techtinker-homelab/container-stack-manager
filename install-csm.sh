@@ -1123,20 +1123,19 @@ EOF
 main() {
     # Create lockfile after parsing args (skip for dry-run)
     if [[ "$dry_run" != "1" ]]; then
-        LOCKDIR="${LOCKDIR:-/run/lock}"
-        CSM_INSTALL_LOG="${CSM_INSTALL_LOG:-$ROOT_USER/.cache/csm/install.log}"
+        LOCKDIR="${LOCKDIR:-/var/lock}"
         # Fallback to writable location if /var/lock isn't usable
         if [[ ! -d "$LOCKDIR" || ! -w "$LOCKDIR" ]]; then
-            LOCKDIR="/tmp"
+            LOCKDIR="/tmp/lock"
         fi
         LOCKFILE="$LOCKDIR/csm-install.lock"
         if [[ ! -d "$LOCKDIR" ]]; then
-            mkdir -p "$LOCKDIR" 2>>"$CSM_INSTALL_LOG" || \
+            mkdir -p "$LOCKDIR" 2>/dev/null || \
             { echo "Cannot create lock dir: $LOCKDIR" >&2; exit 1; }
         fi
-        exec 200>"$LOCKFILE" 2>>"$CSM_INSTALL_LOG" || \
+        exec 200>"$LOCKFILE" || \
             { echo "Cannot open lockfile: $LOCKFILE" >&2; exit 1; }
-        if ! flock -n 200 2>>"$CSM_INSTALL_LOG"; then
+        if ! flock -n 200; then
             echo "Another instance of the CSM Installer is already running." >&2
             exit 1
         fi
