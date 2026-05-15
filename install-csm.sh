@@ -409,16 +409,9 @@ _user_input() {
 
     # Prompt for blank configuration values
     _log STEP "Checking for blank configuration values..."
-    # local blank_count=0
     for var in "${csm_var_prompt[@]}"; do
         if [[ -z "${!var}" ]]; then
-            # ((blank_count++))
             cur=""
-            # Provide suggested defaults for blank values
-            # case "$var" in
-            #     CSM_RUNTIME) cur="docker" ;;
-            #     CSM_UID) cur="${SUDO_UID:-$(id -u)}" ;;
-            # esac
             while read -r -p "Required variable \'${var}\' is blank, enter a value: " new; do
                 case "${input:-}" in
                     "") echo -e " > invalid input <"; return 1; ;;
@@ -432,11 +425,6 @@ _user_input() {
             if [[ -n "$new" ]]; then declare "$var=$new"; _log STEP "Set ${var}=${new}"; fi
         fi
     done
-    # if [[ $blank_count -gt 0 ]]; then
-    #     _log STEP "Configured $blank_count blank values"
-    # else
-    #     _log STEP "All configuration values are set"
-    # fi
 
     if _confirm_no "Do you want to manually edit any configuration values?"; then
         _log STEP "Press ENTER to keep the current value in brackets."
@@ -529,17 +517,36 @@ _get_perms() {
 # CONTAINER RUNTIME DETECTION / INSTALLATION
 # =============================================================================
 
+_detect_group() {
+    curr_runtime="$1"
+    case $os_type in
+        Darwin|*BSD)
+            if dscl . -read /Groups/"$curr_runtime" >/dev/null 2>&1; then
+                CSM_GID=$(dscl . -read /Groups/"$curr_runtime" PrimaryGroupID 2>/dev/null | awk '{print $2}')
+            fi
+            ;;
+        Linux)
+            if getent group "$curr_runtime" >/dev/null 2>&1; then
+                CSM_GID=$(getent group "$curr_runtime" | cut -d: -f3)
+            fi
+            ;;
+    esac
+}
+
 _detect_runtime() {
     if command -v docker >/dev/null 2>&1; then
         _log PASS "Docker found: $(docker --version)"
         csm_runtime="docker"
-        _log STEP "_detect_runtime: docker detected"
+        csm_group="docker"
+        _detect_group "$csm_group"
+        _log STEP "_detect_runtime: docker detected (GID: $csm_gid)"
         return 0
     elif command -v podman >/dev/null 2>&1; then
         _log PASS "Podman found: $(podman --version)"
         csm_runtime="podman"
         csm_group="podman"
-        _log STEP "_detect_runtime: podman detected"
+        _detect_group "$csm_group"
+        _log STEP "_detect_runtime: podman detected (GID: $csm_gid)"
         return 0
     fi
     _log STEP "_detect_runtime: no runtime found"
@@ -1187,6 +1194,7 @@ main() {
     done
 
     # Set up variables
+    _detect_runtime || true
     _vars_setup
 
     # Trigger install or uninstall
