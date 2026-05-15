@@ -25,7 +25,7 @@ set -euo pipefail
 # GLOBAL INSTALLATION VARIABLES, SET TO "1" VIA COMMAND OPTIONS
 # =============================================================================
 
-csm_version="0.5.2"
+csm_version="0.5.3"
 
 # Install operation flags
 dry_run=0

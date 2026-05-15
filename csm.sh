@@ -1077,13 +1077,8 @@ stack_list() {
                     status_label="stopped"
                 fi
             else
-                # Check if compose file is valid first
-                if "$csm_cmd" compose -f "${stack_dir}/compose.yml" config >/dev/null 2>&1; then
-                    running_count="$({ "$csm_cmd" compose -f "${stack_dir}/compose.yml" ps --services --filter status=running | wc -l ; } 2>/dev/null || echo "0")"
-                else
-                    running_count="0"
-                fi
-                if [ "$running_count" -gt 0 ]; then
+                # Check if this stack has running containers
+                if [[ " $running_projects " == *" $dir_name "* ]]; then
                     status_label="running"
                 else
                     status_label="stopped"
