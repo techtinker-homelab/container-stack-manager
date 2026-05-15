@@ -191,7 +191,7 @@ _detect_os() {
 _confirm_yes() {
     if [[ "$force_install" == 1 ]]; then return 0; fi
     local prompt="${1:-Are you sure?}"
-    read -r -p "${prompt} [Y/n]: " reply
+    read -r -p " ${prompt} [Y/n]: " reply
     case "${reply,,}" in
         y|yes|"") return 0 ;;
         *) return 1 ;;
@@ -201,7 +201,7 @@ _confirm_yes() {
 _confirm_no() {
     if [[ "$force_install" == 1 ]]; then return 0; fi
     local prompt="${1:-Are you sure?}"
-    read -r -p "${ylw}${bld}  ${prompt} [y/N]: ${rst}" reply
+    read -r -p "${ylw}${bld} ${prompt} [y/N]: ${rst}" reply
     if [[ "${reply,,}" == "y" ]]; then return 0; fi
     return 1 # Explicitly return 1
 }
@@ -261,6 +261,7 @@ _write_value() {
 _vars_setup() {
     # Set default values
     var_defaults
+    _detect_runtime
 
     # Variable order for iteration
     declare -ga csm_var_order
@@ -523,11 +524,15 @@ _detect_group() {
         Darwin|*BSD)
             if dscl . -read /Groups/"$curr_runtime" >/dev/null 2>&1; then
                 CSM_GID=$(dscl . -read /Groups/"$curr_runtime" PrimaryGroupID 2>/dev/null | awk '{print $2}')
+            else
+                CSM_GID="2000"
             fi
             ;;
         Linux)
             if getent group "$curr_runtime" >/dev/null 2>&1; then
                 CSM_GID=$(getent group "$curr_runtime" | cut -d: -f3)
+            else
+                CSM_GID="2000"
             fi
             ;;
     esac
@@ -535,41 +540,20 @@ _detect_group() {
 
 _detect_runtime() {
     if command -v docker >/dev/null 2>&1; then
-        _log PASS "Docker found: $(docker --version)"
+        _log STEP "Docker found: $(docker --version)"
         csm_runtime="docker"
         csm_group="docker"
-        _detect_group "$csm_group"
-        _log STEP "_detect_runtime: docker detected (GID: $CSM_GID)"
-        return 0
     elif command -v podman >/dev/null 2>&1; then
-        _log PASS "Podman found: $(podman --version)"
+        _log STEP "Podman found: $(podman --version)"
         csm_runtime="podman"
         csm_group="podman"
-        _detect_group "$csm_group"
-        _log STEP "_detect_runtime: podman detected (GID: $CSM_GID)"
-        return 0
+    else
+        _log STEP "_detect_runtime: no runtime found"
+        return 1
     fi
-    _log STEP "_detect_runtime: no runtime found"
-    return 1
-}
-
-_install_docker() {
-    _log STEP "_install_docker: downloading get.docker.com..."
-    curl -fsSL https://get.docker.com -o /tmp/get-docker.sh \
-        || _die "Failed to download Docker installer."
-    _log STEP "_install_docker: running installer..."
-    $var_sudo sh /tmp/get-docker.sh \
-        || _die "Docker installation failed."
-    rm -f /tmp/get-docker.sh
-    _log PASS "Docker installed: $(docker --version)"
-    csm_runtime="docker"
-}
-
-_install_podman() {
-    _log STEP "_install_podman: installing via package manager..."
-    _install_pkg podman
-    _log PASS "Podman installed: $(podman --version)"
-    csm_runtime="podman"
+    _detect_group "$csm_group"
+    _log STEP "_detect_runtime: podman detected (GID: $CSM_GID)"
+    return 0
 }
 
 _install_runtime() {
@@ -580,8 +564,23 @@ _install_runtime() {
 
     local runtime="${1:-docker}"
     case "$runtime" in
-        docker) _install_docker ;;
-        podman) _install_podman ;;
+        docker)
+            _log STEP "_install_docker: downloading get.docker.com..."
+            curl -fsSL https://get.docker.com -o /tmp/get-docker.sh \
+                || _die "Failed to download Docker installer."
+            _log STEP "_install_docker: running installer..."
+            $var_sudo sh /tmp/get-docker.sh \
+                || _die "Docker installation failed."
+            rm -f /tmp/get-docker.sh
+            _log PASS "Docker installed: $(docker --version)"
+            csm_runtime="docker"
+            ;;
+        podman)
+            _log STEP "_install_podman: installing via package manager..."
+            _install_pkg podman
+            _log PASS "Podman installed: $(podman --version)"
+            csm_runtime="podman"
+            ;;
         *) _log EXIT "Unsupported runtime: $runtime" ;;
     esac
 }
@@ -1078,7 +1077,6 @@ _uninstall_csm() {
 }
 
 _install_csm() {
-    _log INFO "Container Stack Manager v${CSM_VERSION} - installer starting"
     if [[ "$force_install" == 1 ]]; then
         _log WARN "FORCE MODE ACTIVE: Existing configs will be overwritten and prompts bypassed."
     fi
@@ -1194,13 +1192,13 @@ main() {
     done
 
     # Set up variables
-    _detect_runtime || true
     _vars_setup
 
     # Trigger install or uninstall
     if [[ "$uninstall_mode" == 1 ]]; then
         _uninstall_csm
     else
+        _log INFO "Container Stack Manager v${CSM_VERSION} - installer starting"
         _install_csm
 
         echo ""
