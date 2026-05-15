@@ -539,14 +539,14 @@ _detect_runtime() {
         csm_runtime="docker"
         csm_group="docker"
         _detect_group "$csm_group"
-        _log STEP "_detect_runtime: docker detected (GID: $csm_gid)"
+        _log STEP "_detect_runtime: docker detected (GID: $CSM_GID)"
         return 0
     elif command -v podman >/dev/null 2>&1; then
         _log PASS "Podman found: $(podman --version)"
         csm_runtime="podman"
         csm_group="podman"
         _detect_group "$csm_group"
-        _log STEP "_detect_runtime: podman detected (GID: $csm_gid)"
+        _log STEP "_detect_runtime: podman detected (GID: $CSM_GID)"
         return 0
     fi
     _log STEP "_detect_runtime: no runtime found"
