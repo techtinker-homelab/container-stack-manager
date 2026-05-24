@@ -204,6 +204,8 @@ _get_owner() {
 }
 
 _detect_runtime() {
+    [[ -n "${csm_cmd:-}" ]] && return 0
+
     if podman compose version >/dev/null 2>&1; then
         csm_cmd="podman"
         _log STEP "_detect_runtime: using podman"
@@ -218,14 +220,41 @@ _detect_runtime() {
 }
 
 _detect_swarm() {
+    # Already decided this session
+    if [[ -n "${swarm_active:-}" ]]; then
+        return $(( swarm_active ? 0 : 1 ))
+    fi
+
     if [[ "$csm_cmd" == "podman" ]]; then
         _log STEP "_detect_swarm: podman detected, skipping"
+        swarm_active=false
+        swarm_state="inactive"
         return 1
     fi
+
     swarm_state="$(docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || echo "inactive")"
     _log STEP "_detect_swarm: swarm state=$swarm_state"
-    if [[ "$swarm_state" == "active" ]]; then return 0; fi
-    return 1 # Explicit return
+    if [[ "$swarm_state" == "active" ]]; then
+        swarm_active=true
+        return 0
+    fi
+    swarm_active=false
+    return 1
+}
+
+# Lazy cached check for the Docker Swarm ingress network (used as a heuristic for swarm mode)
+_has_swarm_ingress() {
+    if [[ "${swarm_ingress_checked:-}" == "1" ]]; then
+        return "${swarm_has_ingress:-1}"
+    fi
+
+    if docker network inspect ingress >/dev/null 2>&1; then
+        swarm_has_ingress=0
+    else
+        swarm_has_ingress=1
+    fi
+    swarm_ingress_checked=1
+    return "$swarm_has_ingress"
 }
 
 _check_prereqs() {
@@ -236,12 +265,13 @@ _check_prereqs() {
         _detect_runtime
     fi
 
-    # Set global swarm_active and swarm_stacks
-    if _detect_swarm; then
-        swarm_active=true
+    # Detect swarm state (lazy inside _detect_swarm)
+    _detect_swarm
+
+    # Populate swarm_stacks if swarm is active (lazy inside _get_swarm_stacks)
+    if [[ "$swarm_active" == true ]]; then
         swarm_stacks="$(_get_swarm_stacks)"
     else
-        swarm_active=false
         swarm_stacks=""
     fi
     _log STEP "_check_prereqs: swarm_active=$swarm_active"
@@ -307,11 +337,15 @@ _setup_variables() {
     csm_secrets="${CSM_SECRETS:-${csm_dir}/.secrets}"
     csm_templates="${CSM_TEMPLATES:-${csm_dir}/.templates}"
 
-    # Assign operation variables with defaults
-    csm_gid="${CSM_GID:-$(_get_gid "${csm_cmd:-docker}")}"
-    csm_uid="${CSM_UID:-$(_get_uid)}"
-    csm_group="$(_get_group "$csm_gid")"
-    csm_owner="$(_get_owner "$csm_uid")"
+    # Assign operation variables with defaults (lazy — only compute if not already set)
+    if [[ -z "${csm_gid:-}" ]]; then
+        csm_gid="${CSM_GID:-$(_get_gid "${csm_cmd:-docker}")}"
+    fi
+    if [[ -z "${csm_uid:-}" ]]; then
+        csm_uid="${CSM_UID:-$(_get_uid)}"
+    fi
+    csm_group="${csm_group:-$(_get_group "$csm_gid")}"
+    csm_owner="${csm_owner:-$(_get_owner "$csm_uid")}"
     csm_network="${CSM_NET_NAME:-csm_network}"
     csm_version="${CSM_VERSION:-unknown}"
 }
@@ -438,7 +472,7 @@ _detect_scope() {
             scope="swarm"
             return 0
         fi
-        if docker network inspect ingress >/dev/null 2>&1; then
+        if _has_swarm_ingress; then
             _log STEP "_detect_scope: ingress network found -> swarm"
             scope="swarm"
             return 0
@@ -469,7 +503,7 @@ stack_create() {
     _log STEP "stack_create: determining target scope..."
     if [[ -n "$user_scope" ]]; then
         target_scope="$user_scope"
-    elif docker network inspect ingress >/dev/null 2>&1; then
+    elif _has_swarm_ingress; then
         _log STEP "stack_create: ingress network found, defaulting to swarm"
         target_scope="swarm"
     fi
@@ -1023,7 +1057,16 @@ stack_info() {
 }
 
 _get_swarm_stacks() {
-    docker stack ls --format '{{.Name}}' 2>/dev/null | sort
+    # Return cached value if we already fetched it this session
+    if [[ -n "${swarm_stacks:-}" ]]; then
+        echo "$swarm_stacks"
+        return 0
+    fi
+
+    local result
+    result="$(docker stack ls --format '{{.Name}}' 2>/dev/null | sort)"
+    swarm_stacks="$result"
+    echo "$result"
 }
 
 _compose_config () {
@@ -1061,9 +1104,10 @@ stack_list() {
     _log STEP "stack_list: csm_dir=$csm_dir"
     if [[ ! -d "$csm_dir" ]]; then _log EXIT "Stacks directory not found: $csm_dir"; fi
 
-    if $swarm_active; then
+    if [[ "$swarm_active" == true ]]; then
+        # _get_swarm_stacks is now lazy/cached — this is cheap after first fetch
         swarm_stacks="$(_get_swarm_stacks)"
-        _log STEP "stack_list: updated swarm_stacks with $(echo "$swarm_stacks" | wc -l) stacks"
+        _log STEP "stack_list: swarm_stacks ready ($(echo "$swarm_stacks" | wc -l) stacks)"
     fi
 
     local -a valid_stacks=()
@@ -1114,11 +1158,14 @@ stack_list() {
                 fi
             fi
 
-            # Determine ports
-            if [[ "$scope" == "swarm" ]]; then
-                ports="$({ docker service ls --filter name="$dir_name" --format "{{.Ports}}" | sed 's/0\.0\.0\.0://g; s/\[::\]://g; s/\*://g' | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//' ; } 2>/dev/null || echo "")"
-            else
-                ports="$({ "$csm_cmd" compose -f "${stack_dir}/compose.yml" ps --format "{{.Ports}}" | sed 's/0\.0\.0\.0://g; s/\[::\]://g; s/\*://g' | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//' ; } 2>/dev/null || echo "")"
+            # Determine ports (avoid expensive per-stack calls for stopped local stacks)
+            ports=""
+            if [[ "$status_label" == "running" ]]; then
+                if [[ "$scope" == "swarm" ]]; then
+                    ports="$({ docker service ls --filter name="$dir_name" --format "{{.Ports}}" | sed 's/0\.0\.0\.0://g; s/\[::\]://g; s/\*://g' | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//' ; } 2>/dev/null || echo "")"
+                else
+                    ports="$({ "$csm_cmd" compose -f "${stack_dir}/compose.yml" ps --format "{{.Ports}}" | sed 's/0\.0\.0\.0://g; s/\[::\]://g; s/\*://g' | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//' ; } 2>/dev/null || echo "")"
+                fi
             fi
 
             # Plain fields
