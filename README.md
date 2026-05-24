@@ -243,7 +243,7 @@ Secrets are stored in `CSM_DIR/.secrets/` as `<name>.secret` files with `600` pe
 | Flag | Description |
 |---|---|
 | `-h`, `--help` | Show help text |
-| `-V`, `--version` | Show version |
+| `-v`, `--version` | Show version |
 | `--aliases` | Print shell aliases to eval in your shell rc |
 
 ---
@@ -297,7 +297,7 @@ Edit with `csm config edit` or manually edit `CSM_DIR/.configs/user.conf`.
 
 | Variable | Default Value | Description |
 |---|---|---|
-| `CSM_VERSION` | 0.5.1 | CSM version |
+| `CSM_VERSION` | (set by installer) | CSM version |
 | `CSM_RUNTIME` | (auto-detect) | `docker` or `podman` |
 | `CSM_DIR` | `/srv/stacks` | Base install directory |
 | `CSM_GID` | 2000 | GID for stack directory ownership |

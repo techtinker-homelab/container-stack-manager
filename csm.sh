@@ -1019,14 +1019,6 @@ _format_tabular_data() {
         }
     "
 }
-# _format_tabular_data() {
-#     local header="$1"
-#     local data_command="$2"
-#     # Strip ANSI codes for column width calculation, then reapply them
-#     { printf "%s%s%s\n" "${bld}" "$header" "${rst}"; eval "$data_command"; } | {
-#         sed -r 's/\x1B\[[0-9;]*[mK]//g' | column -ts $'\t' | sed -r 's/\x1B\[[0-9;]*[mK]//g'
-#     }
-# }
 
 stack_list() {
     _log STEP "stack_list: csm_dir=$csm_dir"
@@ -1118,7 +1110,6 @@ stack_list() {
         done
 
         # Format as table
-        # _format_tabular_data "SCOPE\tSTACK\tSTATUS\tPORTS" "printf '%s' \"$data\""
         _format_tabular_data "SCOPE"$'\t'"NAME"$'\t'"STATUS"$'\t'"PORTS"  "printf '%s' \"$data\""
     else
         _log WARN "No valid stacks found in $csm_dir"
@@ -1325,7 +1316,7 @@ ALIAS
 show_help() {
     _setup_variables
     cat <<EOF
-${bld}Container Stack Manager (CSM) v${csm_version}${rst}
+${bld}Container Stack Manager (CSM) v-${mgn}${csm_version}${rst}
 
 ${bld}Usage:${rst} csm <command> [<stack-name>] [options]
 
@@ -1369,7 +1360,7 @@ ${bld}Options:${rst}
     -h | --help             Show this help
     -v | --version          Show version
 
-${bld}Container Stack Manager (csm.sh) version:${rst} ${ylw}${csm_version}${rst}
+${bld}Container Stack Manager (csm.sh) version:${rst} ${mgn}${csm_version}${rst}
 EOF
 }
 
@@ -1385,7 +1376,7 @@ main() {
     case "$cmd" in
         -a | --aliases)     _print_aliases; exit 0 ;;
         -h | *help | "")    show_help; exit 0 ;;
-        -v | --version)     echo "CSM v${csm_version}"; exit 0 ;;
+        -v | --version)     echo "CSM v-${mgn}${csm_version}${rst}"; exit 0 ;;
     esac
 
     _setup_variables

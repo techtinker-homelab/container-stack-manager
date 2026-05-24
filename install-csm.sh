@@ -9,17 +9,10 @@ set -euo pipefail
 # INSTALL SCRIPT OPERATIONS
 # =============================================================================
 
-# What this script does (in order):
-#   - Validate root / sudo access
-#   - Detect OS package manager
-#   - Detect or install container runtime (Docker or Podman)
-#   - Check / start the container service
-#   - Check / create the container runtime group (GID 2000)
-#   - Create the CSM directory structure with correct permissions
-#   - Install core CSM files
-#   - Create ~/stacks symlink pointing to CSM_DIR
-#   - Symlink /usr/local/bin/csm → CSM_DIR/.configs/csm.sh
-#   - Set final ownership
+# This script installs CSM by:
+# - Validating access and detecting package manager
+# - Installing container runtime if needed
+# - Setting up directories, files, and symlinks
 
 # =============================================================================
 # GLOBAL INSTALLATION VARIABLES, SET TO "1" VIA COMMAND OPTIONS
@@ -30,8 +23,9 @@ csm_version="0.5.3"
 # Install operation flags
 dry_run=0
 csm_debug=0
-force_install=0
-uninstall_mode=0
+forced_mode=0
+remove_mode=0
+update_mode=0
 
 # =============================================================================
 # ENSURE SCRIPT NOT SOURCED
@@ -69,7 +63,7 @@ fi
 
 # NOTE: Change these to work on your intended container host
 var_defaults() {
-    CSM_VERSION="${CSM_VERSION:-${csm_version:-undefined}}"
+    CSM_VERSION="${csm_version:-${CSM_VERSION:-undefined}}"
 
     # Container runtime (docker or podman, leave blank to choose during installation)
     CSM_RUNTIME="${CSM_RUNTIME:-docker}"
@@ -186,10 +180,14 @@ _die() { _log FAIL "$1"; exit 1; }
 
 _detect_os() {
     os_type=$(uname -s)
+    if [[ -z "$os_type" ]]; then
+        _log WARN "Unable to detect OS type"
+        os_type="unknown"
+    fi
 }
 
 _confirm_yes() {
-    if [[ "$force_install" == 1 ]]; then return 0; fi
+    if [[ "$forced_mode" == 1 ]]; then return 0; fi
     local prompt="${1:-Are you sure?}"
     read -r -p " ${prompt} [Y/n]: " reply
     case "${reply,,}" in
@@ -199,11 +197,11 @@ _confirm_yes() {
 }
 
 _confirm_no() {
-    if [[ "$force_install" == 1 ]]; then return 0; fi
+    if [[ "$forced_mode" == 1 ]]; then return 0; fi
     local prompt="${1:-Are you sure?}"
     read -r -p "${ylw}${bld} ${prompt} [y/N]: ${rst}" reply
     if [[ "${reply,,}" == "y" ]]; then return 0; fi
-    return 1 # Explicitly return 1
+    return 1
 }
 
 _sanitize_input() {
@@ -365,7 +363,7 @@ _vars_setup() {
 }
 
 _user_input() {
-    if [[ "$force_install" == 1 ]]; then return 0; fi
+    if [[ "$forced_mode" == 1 ]]; then return 0; fi
     echo
     _log STEP "_user_input: csm_configs=${csm_configs}"
 
@@ -414,9 +412,9 @@ _user_input() {
         if [[ -z "${!var}" ]]; then
             cur=""
             while read -r -p "Required variable \'${var}\' is blank, enter a value: " new; do
-                case "${input:-}" in
-                    "") echo -e " > invalid input <"; return 1; ;;
-                    *) return 0; ;;
+                case "${new}" in
+                    "") echo -e " > invalid input <"; return 1 ;;
+                    *) return 0 ;;
                 esac
             done
 
@@ -459,10 +457,11 @@ _user_input() {
 # =============================================================================
 
 _detect_pkg_manager() {
-    if   command -v apt-get >/dev/null 2>&1; then pkg_mgr="apt-get"
-    elif command -v dnf     >/dev/null 2>&1; then pkg_mgr="dnf"
-    elif command -v yum     >/dev/null 2>&1; then pkg_mgr="yum"
-    elif command -v pacman  >/dev/null 2>&1; then pkg_mgr="pacman"
+    if   command -v nala     >/dev/null 2>&1; then pkg_mgr="nala"
+    elif command -v apt-get  >/dev/null 2>&1; then pkg_mgr="apt-get"
+    elif command -v dnf      >/dev/null 2>&1; then pkg_mgr="dnf"
+    elif command -v yum      >/dev/null 2>&1; then pkg_mgr="yum"
+    elif command -v pacman   >/dev/null 2>&1; then pkg_mgr="pacman"
     elif command -v slackpkg >/dev/null 2>&1; then pkg_mgr="slackpkg"
     else
         _log WARN "Unsupported package manager - install curl, git manually if needed."
@@ -471,28 +470,30 @@ _detect_pkg_manager() {
     _log STEP "_detect_pkg_manager: detected=$pkg_mgr"
 }
 
+_exec_cmd() {
+    _log STEP "$@"
+    if ! $var_sudo "$@"; then
+        _log WARN "$@ failed"
+        return 1
+    fi
+}
+
 _install_pkg() {
     if [[ -z "${pkg_mgr:-}" ]]; then _log WARN "No pkg manager - skipping: $*"; return 0; fi
     _log STEP "_install_pkg: using $pkg_mgr to install: $*"
     case "$pkg_mgr" in
-        apt-get)
-            _log STEP "_install_pkg: running apt-get update -qq"
-            $var_sudo apt-get update -qq
-            _log STEP "_install_pkg: running apt-get install -y $*"
-            $var_sudo apt-get install -y "$@"
+        apt|apt-get|nala)
+            _exec_cmd $pkg_mgr update -qq || return 1
+            _exec_cmd $pkg_mgr install -y "$@" || return 1
             ;;
-        dnf|yum)
-            _log STEP "_install_pkg: running $pkg_mgr install -y $*"
-            $var_sudo "$pkg_mgr" install -y "$@" ;;
-        pacman)
-            _log STEP "_install_pkg: running pacman -S --noconfirm $*"
-            $var_sudo pacman -S --noconfirm "$@" ;;
+        dnf|yum) _exec_cmd "$pkg_mgr" install -y "$@" || return 1 ;;
+        pacman) _exec_cmd $pkg_mgr -S --noconfirm "$@" || return 1 ;;
         slackpkg)
-            _log STEP "_install_pkg: running slackpkg update"
-            $var_sudo slackpkg update
-            _log STEP "_install_pkg: running slackpkg install $*"
-            $var_sudo slackpkg install "$@" ;;
+            _exec_cmd $pkg_mgr update || return 1
+            _exec_cmd $pkg_mgr install "$@" || return 1
+            ;;
     esac
+    return 0
 }
 
 _get_file_info() {
@@ -552,7 +553,7 @@ _detect_runtime() {
         return 1
     fi
     _detect_group "$csm_group"
-    _log STEP "_detect_runtime: podman detected (GID: $CSM_GID)"
+    _log STEP "_detect_runtime: $csm_runtime detected (GID: $CSM_GID)"
     return 0
 }
 
@@ -806,7 +807,7 @@ _install_dir() {
 _install_file() {
     local src="${1:-}" dest="${2:-}" mode="${3:-}" flag="${4:-}"
     local filename=$(basename "$src")
-    if [[ "${force_install}" == 1 ]]; then flag="--force"; fi
+    if [[ "${forced_mode}" == 1 ]]; then flag="--force"; fi
 
     if [[ "$dry_run" == 1 ]]; then
         _log INFO "Would create directory '$tgt' (mode=$mode)"
@@ -993,19 +994,23 @@ _verify_ownership() {
 }
 
 # =============================================================================
-# UNINSTALL
+# REMOVE / UNINSTALL
 # =============================================================================
 
-_uninstall_csm() {
+_remove_csm() {
     _log WARN "Starting CSM ${red}un${ylw}installation..."
     _log WARN "This will remove the core script and symlinks."
+
+    # Assign required variables
+    _vars_setup
+
     if [[ "$force_uninstall" == 0 ]]; then
         _log INFO "Your stacks, ${CSM_CONF_FILE}, and templates will NOT be modified."
     else
         _log INFO "Your stacks will not be touched, but ${CSM_CONF_FILE} and templates, will be removed."
     fi
 
-    _confirm_yes "Proceed with uninstallation?" || { _log INFO "Cancelled."; exit 0; }
+    _confirm_yes "Proceed with removal?" || { _log INFO "Cancelled."; exit 0; }
 
     # Remove Symlinks
     if [[ -L "$bin_link" ]]; then
@@ -1043,7 +1048,7 @@ _uninstall_csm() {
     fi
 
     # Remove user config and templates if force mode
-    if [[ "$force_install" == 1 ]]; then
+    if [[ "$forced_mode" == 1 ]]; then
         _log WARN "Force mode: Removing user config and templates."
         # Remove config files
         for file in "${file_list[@]}"; do
@@ -1076,8 +1081,77 @@ _uninstall_csm() {
     exit 0
 }
 
+# =============================================================================
+# UPDATE
+# =============================================================================
+
+_update_csm() {
+    local installer_version="${csm_version}"
+    _vars_setup
+
+    _log INFO "Container Stack Manager updater starting..."
+
+    # Check current version against updated version
+    local has_existing_csm=false
+    if [[ -f "${csm_configs}/${CSM_CORE_FILE}" ]]; then
+        has_existing_csm=true
+        # Get current version info
+        local current_version
+        current_version=$(grep -oP 'CSM_VERSION=\K[^[:space:]]+' "${csm_configs}/${CSM_CONF_FILE}" 2>/dev/null || echo "unknown")
+        _log INFO "Current version: ${mgn}${current_version}${rst}. Updating to version: ${mgn}${installer_version}${rst}"
+    fi
+
+    if [[ "$has_existing_csm" == true ]]; then
+        # Backup before overwriting
+        if [[ "$forced_mode" == 1 ]] || _confirm_yes "Backup and overwrite ${csm_configs}/${CSM_CORE_FILE}?"; then
+            local backup_dir="${CSM_BACKUPS}"
+            mkdir -p "$backup_dir"
+            local backup_file="${backup_dir}/csm-$(date +%Y%m%d_%H%M%S).sh"
+            _log STEP "Backing up current csm.sh to ${backup_file}"
+            cp -f "${csm_configs}/${CSM_CORE_FILE}" "$backup_file"
+            chown "${csm_uid}:${csm_gid}" "$backup_file" 2>/dev/null || true
+            chmod "$mode_conf" "$backup_file" 2>/dev/null || true
+
+            # Install updated file
+            _log STEP "Installing updated csm.sh"
+            _install_file "${script_path}/${CSM_CORE_FILE}" "${csm_configs}" "$mode_exec"
+
+            # Verify symlink is in place
+            if [[ ! -L "$bin_link" ]]; then
+                _log STEP "Ensuring symlink: ${bin_link} -> ${csm_configs}/${CSM_CORE_FILE}"
+                $var_sudo ln -sf "${csm_configs}/${CSM_CORE_FILE}" "$bin_link"
+            fi
+            if [[ ! -L "$csm_link" ]]; then
+                _log STEP "Ensuring symlink: ${csm_link} -> ${csm_configs}/${CSM_CORE_FILE}"
+                ln -sf "${csm_configs}/${CSM_CORE_FILE}" "$csm_link"
+            fi
+        fi
+    fi
+
+    # Update CSM_VERSION in user.conf if it exists
+    if [[ "$has_existing_csm" == true ]] && [[ -f "${csm_configs}/${CSM_CONF_FILE}" ]]; then
+        if grep -q "^CSM_VERSION=" "${csm_configs}/${CSM_CONF_FILE}" 2>/dev/null; then
+            _log STEP "Updating CSM_VERSION in ${CSM_CONF_FILE}"
+            sed -i "s/^CSM_VERSION=.*/CSM_VERSION=${installer_version}/" "${csm_configs}/${CSM_CONF_FILE}"
+        fi
+    fi
+
+    if [[ "$has_existing_csm" == true ]]; then
+        echo ""
+        _log PASS "CSM updated successfully! New version: ${mgn}${installer_version}${rst}"
+    else
+        _install_csm
+    fi
+    exit 0
+}
+
 _install_csm() {
-    if [[ "$force_install" == 1 ]]; then
+    # Assign required variables
+    _vars_setup
+
+    _log INFO "Container Stack Manager v-${mgn}${CSM_VERSION}${rst} - installer starting"
+
+    if [[ "$forced_mode" == 1 ]]; then
         _log WARN "FORCE MODE ACTIVE: Existing configs will be overwritten and prompts bypassed."
     fi
 
@@ -1091,6 +1165,20 @@ _install_csm() {
     _setup_files
     _setup_symlinks
     _verify_ownership
+
+    echo ""
+    _log PASS "CSM installation complete!"
+    echo ""
+    _log INFO "Next steps:"
+    _log INFO "  1. Edit user.conf      : csm cfg edit"
+    _log INFO "  2. View your stacks    : csm list"
+    _log INFO "  3. Show commands list  : csm --help"
+    # Check if the invoking user is in the container group (for logout reminder)
+    local check_user="${SUDO_USER:-$USER}"
+    if ! groups "$check_user" 2>/dev/null | grep -qw "$csm_group"; then
+        echo
+        _log WARN "Remember to log out and back in so your $csm_group group membership takes effect."
+    fi
 }
 
 # =============================================================================
@@ -1098,26 +1186,32 @@ _install_csm() {
 # =============================================================================
 
 show_help() {
-    cat <<EOF
-${bld}Container Stack Manager (CSM) Installer v${CSM_VERSION}${rst}
+    _vars_setup
 
-${bld}Usage:${rst} ${script_path}/${script_file} [options]
+    cat <<EOF
+${bld}Container Stack Manager (CSM) Installation script
+
+${bld}Syntax:${rst} ${script_path}/${script_file} [options]
 
 ${bld}Options:${rst}
     -b | --debug        Enable debug output.
     -d | --dry-run      Dry run mode: show what would be done without making changes.
     -f | --force        Overwrite script and config files without confirmation.
     -h | --help         Show this help message.
-    -u | --uninstall    Uninstall all CSM scripts and unmodified config files.
+    -u | --remove       Remove all CSM scripts and unmodified config files.
+    -U | --update       Update the CSM core script to the latest version.
     -V | --version      Show installer version.
 
-${bld}Examples:${rst}
-    ${script_path}/${script_file} -f          # Force install, skip prompts
-    ${script_path}/${script_file} -d          # Dry run to see what would happen
-    ${script_path}/${script_file} -fdx        # Force install, dry-run, debug
-    ${script_path}/${script_file} --uninstall # Uninstall CSM
+${bld}Usage:${rst}
+    cd ${script_path}
+    Then run the below example commands:
+    ./${script_file} -f          # Force install, skip prompts
+    ./${script_file} -d          # Dry run to see what would happen
+    ./${script_file} -fdb        # Force install, dry-run, debug
+    ./${script_file} --remove    # Remove CSM
+    ./${script_file} --update    # Update CSM core script
 
-${bld}Container Stack Manager Installer version:${rst} ${ylw}${CSM_VERSION}${rst}
+${bld}Container Stack Manager Installer version:${rst} ${mgn}${CSM_VERSION}${rst}
 EOF
 }
 
@@ -1149,9 +1243,9 @@ main() {
     _color_setup
     _detect_os
 
-    # Parse arguments - support both short (-f) and long (--force) options
+    # Parse arguments
     local opts
-    opts=$(getopt -o bdfhuV -l debug,dry-run,force,help,uninstall,version -n "$0" -- "$@") || {
+    opts=$(getopt -o bdfhruvx -l debug,dry-run,force,help,remove,update,version -n "$0" -- "$@") || {
         show_help
         exit 1
     }
@@ -1169,19 +1263,23 @@ main() {
                 shift
                 ;;
             -f|--force)
-                force_install=1
+                forced_mode=1
                 shift
                 ;;
             -h|--help)
                 show_help
                 exit 0
                 ;;
-            -u|--uninstall)
-                uninstall_mode=1
+            -r|-x|--remove)
+                remove_mode=1
                 shift
                 ;;
-            -V|--version)
-                _log PASS "Container Stack Manager version: ${CSM_VERSION}"
+            -u|--update)
+                update_mode=1
+                shift
+                ;;
+            -v|--version)
+                _log PASS "Container Stack Manager version: ${mgn}${CSM_VERSION}${rst}"
                 exit 0
                 ;;
             --)
@@ -1191,30 +1289,15 @@ main() {
         esac
     done
 
-    # Set up variables
-    _vars_setup
-
-    # Trigger install or uninstall
-    if [[ "$uninstall_mode" == 1 ]]; then
-        _uninstall_csm
+    # Trigger install, update, or uninstall
+    if [[ "$remove_mode" == 1 ]]; then
+        _remove_csm
+    elif [[ "$update_mode" == 1 ]]; then
+        _update_csm
     else
-        _log INFO "Container Stack Manager v${CSM_VERSION} - installer starting"
         _install_csm
-
-        echo ""
-        _log PASS "CSM installation complete!"
-        echo ""
-        _log INFO "Next steps:"
-        _log INFO "  1. Edit user.conf      : csm cfg edit"
-        _log INFO "  2. View your stacks    : csm list"
-        _log INFO "  3. Show commands list  : csm --help"
-        # Check if the invoking user is in the container group (for logout reminder)
-        local check_user="${SUDO_USER:-$USER}"
-        if ! groups "$check_user" 2>/dev/null | grep -qw "$csm_group"; then
-            echo
-            _log WARN "Remember to log out and back in so your $csm_group group membership takes effect."
-        fi
     fi
+    echo ""
     trap 'flock -u 200; exec 200>&-; exit' EXIT
 }
 
