@@ -246,9 +246,6 @@ _check_prereqs() {
     fi
     _log STEP "_check_prereqs: swarm_active=$swarm_active"
 
-    # Check stacks directory permissions
-    _ensure_perms "$csm_dir"
-
     # Check container group and set csm_gid
     csm_gid=$(_get_gid "$csm_group")
     if [[ -z "$csm_gid" ]]; then
@@ -262,6 +259,9 @@ _check_prereqs() {
         _log EXIT "Unable to determine user UID. Check user setup."
     fi
     _log STEP "_check_prereqs: csm_uid=$csm_uid"
+
+    # Check stacks directory permissions (now that uid/gid are known)
+    _ensure_perms "$csm_dir"
 
     # Check backups directory existence
     if [[ ! -d "$csm_backups" ]]; then
@@ -319,24 +319,57 @@ _setup_variables() {
 _ensure_perms() {
     local target="${1:-}"
     _log STEP "_ensure_perms: ensuring correct permissions on $target"
+
     if [[ ! -d "$target" ]]; then
         _log WARN "Directory not found: $target"
         return 1
     fi
+
     local mode
     mode="$(_get_mode "$target")"
     if [[ -z "$mode" ]]; then
         _log WARN "Unable to get permissions for $target"
-        _log WARN "Fix manually: sudo chmod 2770 \"$stack_dir\" && find \"$stack_dir\" -type f -exec chmod 660 {} \\;"
+        _log WARN "Fix manually: chmod -R 2770 \"$target\" && find \"$target\" -type f -exec chmod 660 {} +"
         return 1
     fi
-    if [[ "$mode" != "2770" ]]; then
-        _log STEP "_ensure_perms: incorrect perms ($mode), fixing to drwxrws---"
-        find "$target" -type f -exec chmod 660 {} \;
-        find "$target" -type d -exec chmod 2770 {} \;
-        _log PASS "Fixed permissions on $target"
-    else
+
+    if [[ "$mode" == "2770" ]]; then
         _log STEP "_ensure_perms: permissions already correct"
+        return 0
+    fi
+
+    _log WARN "Directory $target has mode $mode (expected 2770 with setgid)."
+
+    local should_fix=false
+    if [[ "$forced_mode" == 1 ]]; then
+        should_fix=true
+    elif [[ "$target" == "$csm_dir" ]]; then
+        if _confirm_yes "Should I run ${cyn}chmod -R${rst} for the incorrectly permissioned stacks folder?"; then
+            should_fix=true
+        fi
+    else
+        # e.g. a newly created stack directory
+        if _confirm_yes "Fix permissions on $target?"; then
+            should_fix=true
+        fi
+    fi
+
+    if [[ "$should_fix" == true ]]; then
+        _log STEP "_ensure_perms: applying permission fixes (chmod -R + batched find for speed)"
+        if [[ "$dry_run" == 1 ]]; then
+            _log INFO "Would correct permissions on $target"
+            return 0
+        fi
+
+        # Fast correction (much quicker than per-file -exec \;)
+        chmod -R 770 "$target" 2>/dev/null || true
+        find "$target" -type f -exec chmod 660 {} + 2>/dev/null || true
+        find "$target" -type d -exec chmod 2770 {} + 2>/dev/null || true
+        find "$target" -type d -exec chmod g+s {} + 2>/dev/null || true
+
+        _log PASS "Permissions corrected on $target"
+    else
+        _log WARN "Left $target with non-standard permissions."
     fi
 }
 
