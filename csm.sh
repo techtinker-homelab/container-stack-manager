@@ -98,6 +98,10 @@ _log() {
 
 _detect_os() {
     os_type=$(uname -s)
+    if [[ -z "$os_type" ]]; then
+        _log WARN "Unable to detect OS type"
+        os_type="unknown"
+    fi
 }
 
 _get_mode() {
@@ -1372,14 +1376,14 @@ main() {
     local cmd="${1:-}"
     _color_setup
     _detect_os
+    _setup_variables
     if [[ -z "$cmd" ]]; then show_help; exit 0; fi
     case "$cmd" in
         -a | --aliases)     _print_aliases; exit 0 ;;
         -h | *help | "")    show_help; exit 0 ;;
-        -v | --version)     echo "CSM v-${mgn}${csm_version}${rst}"; exit 0 ;;
+        -v | --version)     echo "Container Stack Manager v-${mgn}${csm_version}${rst}"; exit 0 ;;
     esac
 
-    _setup_variables
     _check_prereqs
     shift || true
 

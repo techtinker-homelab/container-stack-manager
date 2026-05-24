@@ -18,7 +18,7 @@ set -euo pipefail
 # GLOBAL INSTALLATION VARIABLES, SET TO "1" VIA COMMAND OPTIONS
 # =============================================================================
 
-csm_version="0.5.3"
+csm_version="0.5.4"
 
 # Install operation flags
 dry_run=0
@@ -1093,14 +1093,19 @@ _update_csm() {
 
     # Check current version against updated version
     local has_existing_csm=false
+    local current_version="unknown"
     if [[ -f "${csm_configs}/${CSM_CORE_FILE}" ]]; then
         has_existing_csm=true
         # Get current version info
-        local current_version
         current_version=$(grep -oP 'CSM_VERSION=\K[^[:space:]]+' "${csm_configs}/${CSM_CONF_FILE}" 2>/dev/null || echo "unknown")
-        _log INFO "Current version: ${mgn}${current_version}${rst}. Updating to version: ${mgn}${installer_version}${rst}"
+        if [[ "$current_version" != "$installer_version" ]]; then
+            _log INFO "Current version: ${mgn}${current_version}${rst}. Updating to version: ${mgn}${installer_version}${rst}"
+        else
+            _log INFO "Current version: ${mgn}${current_version}${rst} matches installer. Redeploy script anyway?"
+        fi
     fi
 
+    local did_update=false
     if [[ "$has_existing_csm" == true ]]; then
         # Backup before overwriting
         if [[ "$forced_mode" == 1 ]] || _confirm_yes "Backup and overwrite ${csm_configs}/${CSM_CORE_FILE}?"; then
@@ -1112,24 +1117,21 @@ _update_csm() {
             chown "${csm_uid}:${csm_gid}" "$backup_file" 2>/dev/null || true
             chmod "$mode_conf" "$backup_file" 2>/dev/null || true
 
-            # Install updated file
+            # Install updated file (force to ensure overwrite)
             _log STEP "Installing updated csm.sh"
-            _install_file "${script_path}/${CSM_CORE_FILE}" "${csm_configs}" "$mode_exec"
+            _install_file "${script_path}/${CSM_CORE_FILE}" "${csm_configs}" "$mode_exec" --force
 
-            # Verify symlink is in place
-            if [[ ! -L "$bin_link" ]]; then
-                _log STEP "Ensuring symlink: ${bin_link} -> ${csm_configs}/${CSM_CORE_FILE}"
-                $var_sudo ln -sf "${csm_configs}/${CSM_CORE_FILE}" "$bin_link"
-            fi
-            if [[ ! -L "$csm_link" ]]; then
-                _log STEP "Ensuring symlink: ${csm_link} -> ${csm_configs}/${CSM_CORE_FILE}"
-                ln -sf "${csm_configs}/${CSM_CORE_FILE}" "$csm_link"
-            fi
+            # Force-refresh symlinks during update
+            _log STEP "Ensuring symlinks point to updated csm.sh"
+            $var_sudo ln -snf "${csm_configs}/${CSM_CORE_FILE}" "$bin_link"
+            ln -snf "${csm_configs}/${CSM_CORE_FILE}" "$csm_link"
+
+            did_update=true
         fi
     fi
 
-    # Update CSM_VERSION in user.conf if it exists
-    if [[ "$has_existing_csm" == true ]] && [[ -f "${csm_configs}/${CSM_CONF_FILE}" ]]; then
+    # Update CSM_VERSION in user.conf ONLY if script was replaced
+    if [[ "$did_update" == true ]] && [[ -f "${csm_configs}/${CSM_CONF_FILE}" ]]; then
         if grep -q "^CSM_VERSION=" "${csm_configs}/${CSM_CONF_FILE}" 2>/dev/null; then
             _log STEP "Updating CSM_VERSION in ${CSM_CONF_FILE}"
             sed -i "s/^CSM_VERSION=.*/CSM_VERSION=${installer_version}/" "${csm_configs}/${CSM_CONF_FILE}"
@@ -1137,8 +1139,12 @@ _update_csm() {
     fi
 
     if [[ "$has_existing_csm" == true ]]; then
-        echo ""
-        _log PASS "CSM updated successfully! New version: ${mgn}${installer_version}${rst}"
+        if [[ "$did_update" == true ]]; then
+            echo ""
+            _log PASS "CSM updated successfully! New version: ${mgn}${installer_version}${rst}"
+        else
+            _log INFO "CSM update skipped."
+        fi
     else
         _install_csm
     fi
@@ -1199,8 +1205,8 @@ ${bld}Options:${rst}
     -f | --force        Overwrite script and config files without confirmation.
     -h | --help         Show this help message.
     -u | --remove       Remove all CSM scripts and unmodified config files.
-    -U | --update       Update the CSM core script to the latest version.
-    -V | --version      Show installer version.
+    -u | --update       Update the CSM core script to the latest version.
+    -v | --version      Show installer version.
 
 ${bld}Usage:${rst}
     cd ${script_path}
@@ -1279,6 +1285,7 @@ main() {
                 shift
                 ;;
             -v|--version)
+                _vars_setup
                 _log PASS "Container Stack Manager version: ${mgn}${CSM_VERSION}${rst}"
                 exit 0
                 ;;
