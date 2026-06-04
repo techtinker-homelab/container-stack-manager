@@ -45,14 +45,15 @@ set -euo pipefail
 # =============================================================================
 readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
-csm_debug="0" # set to "1" to display debug step messages
+csm_debug="${CSM_DEBUG:-0}"     # set to "1" to display debug step messages
+
 csm_cmd=""    # set by _detect_runtime
 scope=""      # set by _detect_scope
 
 # Permission modes (symbolic form — compatible with GNU and BSD install)
 readonly mode_exec="770"   # executables:  rwxrwx---
 readonly mode_conf="660"   # config files: rw-rw----
-readonly mode_auth="600"   # secrets:      rw-------
+readonly mode_auth="600"   # secret files: rw-------
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -203,92 +204,140 @@ _get_owner() {
     echo "${user_name:-$USER}"
 }
 
-_detect_runtime() {
-    [[ -n "${csm_cmd:-}" ]] && return 0
+# Clean Docker/Podman port strings (removes 0.0.0.0, [::], *, dedupes, trims trailing comma)
+clean_ports() {
+    sed 's/0\.0\.0\.0://g; s/\[::\]://g; s/\*://g' <<<"$1" |
+        tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//' || true
+}
 
-    if podman compose version >/dev/null 2>&1; then
-        csm_cmd="podman"
+_detect_runtime() {
+    [[ -v csm_cmd && -n "$csm_cmd" ]] && return 0
+
+    _log STEP "_detect_runtime: probing container runtimes..."
+
+    if command -v podman >/dev/null 2>&1 && podman compose version >/dev/null 2>&1; then
+        declare -g csm_cmd="podman"
         _log STEP "_detect_runtime: using podman"
-    elif docker compose version >/dev/null 2>&1; then
-        csm_cmd="docker"
+    elif command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+        declare -g csm_cmd="docker"
         _log STEP "_detect_runtime: using docker"
-    elif command -v docker-compose >/dev/null 2>&1; then
-        _log EXIT "'docker-compose' v1 is unsupported. Upgrade to 'docker compose' (v2)."
+    elif command -v docker >/dev/null 2>&1; then
+        # Docker is present but compose subcommand may be separate plugin
+        declare -g csm_cmd="docker"
+        _log STEP "_detect_runtime: using docker (fallback)"
+    elif command -v podman >/dev/null 2>&1; then
+        declare -g csm_cmd="podman"
+        _log STEP "_detect_runtime: using podman (fallback)"
     else
-        _log EXIT "No supported container runtime found. Install Docker or Podman."
+        _log EXIT "No supported container runtime (docker/podman) found."
     fi
 }
 
 _detect_swarm() {
-    # Already decided this session
-    if [[ -n "${swarm_active:-}" ]]; then
-        return $(( swarm_active ? 0 : 1 ))
-    fi
+    [[ -v swarm_active ]] && return $(( swarm_active == "true" ? 0 : 1 ))
 
-    if [[ "$csm_cmd" == "podman" ]]; then
+    if [[ "${csm_cmd:-}" == "podman" ]]; then
         _log STEP "_detect_swarm: podman detected, skipping"
-        swarm_active=false
-        swarm_state="inactive"
+        declare -g swarm_active=false
+        declare -g swarm_state="inactive"
         return 1
     fi
 
-    swarm_state="$(docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || echo "inactive")"
-    _log STEP "_detect_swarm: swarm state=$swarm_state"
-    if [[ "$swarm_state" == "active" ]]; then
-        swarm_active=true
+    local state
+    state="$(docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || echo "inactive")"
+    _log STEP "_detect_swarm: swarm state=$state"
+    if [[ "$state" == "active" ]]; then
+        declare -g swarm_active=true
+        declare -g swarm_state="$state"
         return 0
     fi
-    swarm_active=false
+    declare -g swarm_active=false
+    declare -g swarm_state="$state"
     return 1
 }
 
 # Lazy cached check for the Docker Swarm ingress network (used as a heuristic for swarm mode)
 _has_swarm_ingress() {
-    if [[ "${swarm_ingress_checked:-}" == "1" ]]; then
+    if [[ -v swarm_ingress_checked ]]; then
         return "${swarm_has_ingress:-1}"
     fi
 
+    local has_ingress=1
     if docker network inspect ingress >/dev/null 2>&1; then
-        swarm_has_ingress=0
-    else
-        swarm_has_ingress=1
+        has_ingress=0
     fi
-    swarm_ingress_checked=1
-    return "$swarm_has_ingress"
+    declare -g swarm_has_ingress="$has_ingress"
+    declare -g swarm_ingress_checked=1
+    return "$has_ingress"
+}
+
+# =============================================================================
+# CENTRAL STATE INITIALIZATION (authoritative lazy initialization point)
+# =============================================================================
+# All expensive runtime, swarm, and identity detection should go through
+# this function (or the individual lazy detectors it calls). This ensures
+# expensive commands (docker info, compose version, stack ls, etc.) run
+# at most once per csm invocation.
+
+# Lightweight identity initialization (gid/uid etc.)
+_ensure_identity() {
+    if [[ ! -v csm_gid || -z "$csm_gid" ]]; then
+        declare -g csm_gid="${CSM_GID:-$(_get_gid "${csm_cmd:-docker}")}"
+    fi
+    if [[ ! -v csm_uid || -z "$csm_uid" ]]; then
+        declare -g csm_uid="${CSM_UID:-$(_get_uid)}"
+    fi
+    if [[ ! -v csm_group || -z "$csm_group" ]]; then
+        declare -g csm_group="$(_get_group "${csm_gid:-}")"
+    fi
+    if [[ ! -v csm_owner || -z "$csm_owner" ]]; then
+        declare -g csm_owner="$(_get_owner "${csm_uid:-}")"
+    fi
+}
+
+_ensure_csm_state() {
+    # Idempotent: safe to call multiple times
+    if [[ "${_csm_state_initialized:-}" == "1" ]]; then
+        return 0
+    fi
+
+    _detect_runtime          # sets csm_cmd (lazy inside)
+    _detect_swarm            # sets swarm_active + swarm_state (lazy inside)
+
+    if [[ "${swarm_active}" == "true" ]]; then
+        swarm_stacks="$(_get_swarm_stacks)"
+    else
+        swarm_stacks=""
+    fi
+
+    _ensure_identity         # gid/uid/group/owner (lazy inside)
+
+    declare -g _csm_state_initialized=1
 }
 
 _check_prereqs() {
     _log STEP "_check_prereqs: checking container runtime, permissions, and group..."
 
-    # Detect container runtime first
-    if [[ -z "${csm_cmd:-}" ]]; then
-        _detect_runtime
-    fi
+    _ensure_csm_state
 
-    # Detect swarm state (lazy inside _detect_swarm)
-    _detect_swarm
-
-    # Populate swarm_stacks if swarm is active (lazy inside _get_swarm_stacks)
-    if [[ "$swarm_active" == true ]]; then
-        swarm_stacks="$(_get_swarm_stacks)"
-    else
-        swarm_stacks=""
-    fi
     _log STEP "_check_prereqs: swarm_active=$swarm_active"
 
-    # Check container group and set csm_gid
-    csm_gid=$(_get_gid "$csm_group")
+    # Validate/ensure identity (in case user.conf overrode values)
+    if [[ -z "${csm_gid:-}" ]]; then
+        csm_gid="$(_get_gid "${csm_group:-docker}")"
+    fi
     if [[ -z "$csm_gid" ]]; then
-        _log EXIT "Container group '$csm_group' not found or GID cannot be determined. Please run the installer to create the group."
+        _log EXIT "Container group '$csm_group' not found or GID cannot be determined."
     fi
-    _log STEP "_check_prereqs: csm_group=$csm_group csm_gid=$csm_gid"
 
-    # Set csm_uid with fallback
-    csm_uid="${SUDO_UID:-$(id -u "$USER" 2>/dev/null || id -u)}"
-    if [[ -z "$csm_uid" ]]; then
-        _log EXIT "Unable to determine user UID. Check user setup."
+    if [[ -z "${csm_uid:-}" ]]; then
+        csm_uid="${SUDO_UID:-$(id -u "$USER" 2>/dev/null || id -u)}"
     fi
-    _log STEP "_check_prereqs: csm_uid=$csm_uid"
+    if [[ -z "$csm_uid" ]]; then
+        _log EXIT "Unable to determine user UID."
+    fi
+
+    _log STEP "_check_prereqs: csm_group=$csm_group csm_gid=$csm_gid csm_uid=$csm_uid"
 
     # Check stacks directory permissions (now that uid/gid are known)
     _ensure_perms "$csm_dir"
@@ -330,22 +379,16 @@ _setup_variables() {
         fi
     done
 
-    # Assign directory variables with defaults
+    # Directory variables (cheap)
     csm_dir="${CSM_DIR:-/srv/stacks}"
     csm_backups="${CSM_BACKUPS:-${csm_dir}/.backups}"
     csm_configs="${CSM_CONFIGS:-${csm_dir}/.configs}"
     csm_secrets="${CSM_SECRETS:-${csm_dir}/.secrets}"
     csm_templates="${CSM_TEMPLATES:-${csm_dir}/.templates}"
 
-    # Assign operation variables with defaults (lazy — only compute if not already set)
-    if [[ -z "${csm_gid:-}" ]]; then
-        csm_gid="${CSM_GID:-$(_get_gid "${csm_cmd:-docker}")}"
-    fi
-    if [[ -z "${csm_uid:-}" ]]; then
-        csm_uid="${CSM_UID:-$(_get_uid)}"
-    fi
-    csm_group="${csm_group:-$(_get_group "$csm_gid")}"
-    csm_owner="${csm_owner:-$(_get_owner "$csm_uid")}"
+    # Use central lazy identity initialization
+    _ensure_identity
+
     csm_network="${CSM_NET_NAME:-csm_network}"
     csm_version="${CSM_VERSION:-unknown}"
 }
@@ -465,7 +508,7 @@ _detect_scope() {
     fi
 
     # Check swarm status, otherwise set local scope
-    if $swarm_active; then
+    if [[ "${swarm_active:-false}" == "true" ]]; then
         # Swarm is active, now check if stack is deployed
         if <<<"$swarm_stacks" grep -qw "$stack_name"; then
             _log STEP "_detect_scope: stack found in swarm_stacks -> swarm"
@@ -696,61 +739,36 @@ stack_ops() {
     _detect_scope "$stack_name"
 
     case "$action" in
-        up)
+        start|up)
             case "$scope" in
                 swarm)
-                    if docker stack deploy -c "$file" "$stack_name"; then
-                        _log PASS "Swarm stack '$stack_name' is up."
-                    else
-                        _log EXIT "Failed to bring up Swarm stack '$stack_name'."
-                    fi
-                    ;;
-                local)
-                    if "$csm_cmd" compose -f "$file" up -d --remove-orphans; then
-                        _log PASS "Stack '$stack_name' is up."
-                    else
-                        _log EXIT "Failed to bring up Local stack '$stack_name'."
-                    fi
-                    ;;
-            esac
-            ;;
-        down)
-            case "$scope" in
-                swarm)
-                    if docker stack rm "$stack_name"; then
-                        _log PASS "Swarm stack '$stack_name' brought down."
-                    else
-                        _log EXIT "Failed to bring down Swarm stack '$stack_name'."
-                    fi
-                    ;;
-                local)
-                    if "$csm_cmd" compose -f "$file" down; then
-                        _log PASS "Stack '$stack_name' brought down."
-                    else
-                        _log EXIT "Failed to bring down Local stack '$stack_name'."
-                    fi
-                    ;;
-            esac
-            ;;
-        start)
-            case "$scope" in
-                swarm)
-                    if docker stack deploy -c "$file" "$stack_name"; then
+                    if docker stack deploy --detach=true -c "$file" "$stack_name"; then
                         _log PASS "Swarm stack '$stack_name' started."
                     else
                         _log EXIT "Failed to start Swarm stack '$stack_name'."
                     fi
                     ;;
                 local)
-                    if "$csm_cmd" compose -f "$file" start; then
-                        _log PASS "Stack '$stack_name' started."
-                    else
-                        _log EXIT "Failed to start Local stack '$stack_name'."
-                    fi
+                    case "$action" in
+                        start)
+                            if "$csm_cmd" compose -f "$file" start; then
+                                _log PASS "Stack '$stack_name' started."
+                            else
+                                _log EXIT "Failed to start Local stack '$stack_name'."
+                            fi
+                            ;;
+                        up)
+                            if "$csm_cmd" compose -f "$file" up -d --remove-orphans; then
+                                _log PASS "Stack '$stack_name' is up."
+                            else
+                                _log EXIT "Failed to bring up Local stack '$stack_name'."
+                            fi
+                            ;;
+                    esac
                     ;;
             esac
             ;;
-        stop)
+        stop|down)
             case "$scope" in
                 swarm)
                     if docker stack rm "$stack_name"; then
@@ -760,11 +778,22 @@ stack_ops() {
                     fi
                     ;;
                 local)
-                    if "$csm_cmd" compose -f "$file" stop; then
-                        _log PASS "Stack '$stack_name' stopped."
-                    else
-                        _log EXIT "Failed to stop Local stack '$stack_name'."
-                    fi
+                    case "$action" in
+                        stop)
+                            if "$csm_cmd" compose -f "$file" stop; then
+                                _log PASS "Stack '$stack_name' stopped."
+                            else
+                                _log EXIT "Failed to stop Local stack '$stack_name'."
+                            fi
+                            ;;
+                        down)
+                            if "$csm_cmd" compose -f "$file" down; then
+                                _log PASS "Stack '$stack_name' brought down."
+                            else
+                                _log EXIT "Failed to bring down Local stack '$stack_name'."
+                            fi
+                            ;;
+                    esac
                     ;;
             esac
             ;;
@@ -833,25 +862,6 @@ stack_ops() {
 # SECRETS MANAGEMENT (public)
 # =============================================================================
 
-_safe_secret() {
-    local secret_file old_umask rc
-    secret_file="${1:-}"
-    value="${2-}"
-    old_umask="$(umask)"
-    umask 077
-
-    if [[ -n "$value" ]]; then
-        printf '%s' "$value" > "$secret_file"
-    else
-        cat > "$secret_file"
-    fi
-    rc=$?
-    umask "$old_umask" || return 1
-    (( rc == 0 )) || return "$rc"
-
-    chmod 600 "$secret_file"
-}
-
 secret() {
     local action="${1:-}"
     shift || true
@@ -864,15 +874,39 @@ secret() {
     esac
 }
 
+_safe_secret() {
+    local secret_file value old_umask rc
+    secret_file="${1:-}"
+    value="${2-}"
+    [[ -n "$secret_file" ]] || return 1
+
+    old_umask="$(umask)"
+    umask 077
+
+    if [[ -n "$value" ]]; then
+        printf '%s' "$value" > "$secret_file"
+    else
+        cat > "$secret_file"
+    fi
+    rc=$?
+
+    umask "$old_umask" || return 1
+    (( rc == 0 )) || return "$rc"
+
+    chmod 600 "$secret_file"
+}
+
 _secret_validate_file() {
-    local file
+    local file mode
     file="$1"
+
     if [[ -L "$file" ]]; then
         _log EXIT "Refusing symlinked secret file: $file"
     fi
     if [[ ! -r "$file" ]]; then
         _log EXIT "Secret file exists but is not readable: $file"
     fi
+
     mode="$(_get_mode "$file")"
     if [[ "${mode:-}" != "600" ]]; then
         _log WARN "Secret file permissions are ${mode:-}, expected 600."
@@ -882,10 +916,9 @@ _secret_validate_file() {
 secret_create() {
     local name secret_file
     name="${1:-}"
-    if [[ -z "${name// }" ]]; then _log EXIT "Secret name cannot be empty."; fi
+    if [[ ! "$name" =~ [^[:space:]] ]]; then _log EXIT "Secret name cannot be empty."; fi
     secret_file="${csm_secrets}/${name}.secret"
 
-    if [[ ! -n "$name" ]]; then _log EXIT "Secret name is required."; fi
     if [[ ! -d "$csm_secrets" ]]; then
         _log EXIT "The csm_secrets directory does not exist. Unable to create backup secret, exiting."
     fi
@@ -905,7 +938,10 @@ secret_create() {
     fi
 
     if [[ ! -t 0 ]]; then
-        _safe_secret "$secret_file"
+        _safe_secret "$secret_file" || {
+            rm -f "$secret_file"
+            _log EXIT "Failed to write secret file."
+            }
         if [[ ! -s "$secret_file" ]]; then
             rm -f "$secret_file"
             _log EXIT "Secret value is required."
@@ -918,11 +954,17 @@ secret_create() {
     fi
 
     local value=""
-    read -r -s -p "Enter secret value for '$name': " value
+    if ! read -r -s -p "Enter secret value for '$name': " value; then
+        printf '\n' >&2
+        _log EXIT "Failed to read secret value."
+    fi
     printf '\n' >&2
     if [[ ! -n "$value" ]]; then _log EXIT "Secret value is required."; fi
 
-    _safe_secret "$secret_file" "$value"
+    _safe_secret "$secret_file" "$value" || {
+        rm -f "$secret_file"
+        _log EXIT "Failed to write secret file."
+        }
 
     docker secret create "$name" "$secret_file" \
         && _log PASS "Docker secret '$name' created from prompt input (saved to $secret_file)." \
@@ -1057,15 +1099,14 @@ stack_info() {
 }
 
 _get_swarm_stacks() {
-    # Return cached value if we already fetched it this session
-    if [[ -n "${swarm_stacks:-}" ]]; then
+    if [[ -v swarm_stacks && -n "$swarm_stacks" ]]; then
         echo "$swarm_stacks"
         return 0
     fi
 
     local result
     result="$(docker stack ls --format '{{.Name}}' 2>/dev/null | sort)"
-    swarm_stacks="$result"
+    declare -g swarm_stacks="$result"
     echo "$result"
 }
 
@@ -1101,6 +1142,19 @@ _format_tabular_data() {
 }
 
 stack_list() {
+    local show_ports=false
+    local show_unmanaged=true
+
+    # Simple flag parsing
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -p | --ports)      show_ports=true ;;
+            --no-unmanaged)    show_unmanaged=false ;;
+            *)                 ;;   # ignore unknown for now
+        esac
+        shift
+    done
+
     _log STEP "stack_list: csm_dir=$csm_dir"
     if [[ ! -d "$csm_dir" ]]; then _log EXIT "Stacks directory not found: $csm_dir"; fi
 
@@ -1126,9 +1180,35 @@ stack_list() {
     done < <(find "$csm_dir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print0 | sort -z)
 
     if [[ ${#valid_stacks[@]} -gt 0 ]]; then
-        # Precompute running local projects to avoid per-stack subprocesses
+        # Precompute running local projects (status) — cheap, always useful
         local running_projects=""
-        running_projects="$({ $csm_cmd ps --filter status=running --format "{{.Labels}}" | { grep -o 'com\.docker\.compose\.project=[^,]*' | cut -d= -f2 | sort | uniq | tr '\n' ' '; } ; } 2>/dev/null || echo "")"
+        running_projects="$(
+            $csm_cmd ps --filter status=running --format '{{.Labels}}' 2>/dev/null |
+            grep -o 'com\.docker\.compose\.project=[^,]*' |
+            cut -d= -f2 |
+            sort -u |
+            tr '\n' ' '
+        )"
+
+        # Expensive port precomputes — only if user wants ports
+        declare -A local_project_ports=()
+        declare -A swarm_service_ports=()
+        if [[ "$show_ports" == true ]]; then
+            # Bulk precompute ports for all running local projects
+            while IFS=$'\t' read -r labels ports; do
+                proj=$(grep -o 'com\.docker\.compose\.project=[^,]*' <<<"$labels" | cut -d= -f2 | head -1 || true)
+                if [[ -n "$proj" ]]; then
+                    local_project_ports[$proj]="$(clean_ports "$ports")"
+                fi
+            done < <($csm_cmd ps --filter status=running --format "{{.Labels}}\t{{.Ports}}" 2>/dev/null)
+
+            # Bulk precompute ports for Swarm services
+            if [[ "$swarm_active" == true ]]; then
+                while IFS=$'\t' read -r name ports; do
+                    swarm_service_ports[$name]="$(clean_ports "$ports")"
+                done < <(docker service ls --format "{{.Name}}\t{{.Ports}}" 2>/dev/null)
+            fi
+        fi
 
         local data=""
         for dir_name in "${valid_stacks[@]}"; do
@@ -1158,13 +1238,12 @@ stack_list() {
                 fi
             fi
 
-            # Determine ports (avoid expensive per-stack calls for stopped local stacks)
             ports=""
-            if [[ "$status_label" == "running" ]]; then
+            if [[ "$show_ports" == true && "$status_label" == "running" ]]; then
                 if [[ "$scope" == "swarm" ]]; then
-                    ports="$({ docker service ls --filter name="$dir_name" --format "{{.Ports}}" | sed 's/0\.0\.0\.0://g; s/\[::\]://g; s/\*://g' | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//' ; } 2>/dev/null || echo "")"
+                    ports="${swarm_service_ports[$dir_name]:-}"
                 else
-                    ports="$({ "$csm_cmd" compose -f "${stack_dir}/compose.yml" ps --format "{{.Ports}}" | sed 's/0\.0\.0\.0://g; s/\[::\]://g; s/\*://g' | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//' ; } 2>/dev/null || echo "")"
+                    ports="${local_project_ports[$dir_name]:-}"
                 fi
             fi
 
@@ -1178,23 +1257,37 @@ stack_list() {
             data+="${scope_field}"$'\t'"${name}"$'\t'"${status}"$'\t'"${ports_field}"$'\n'
         done
 
-        # Get all compose projects
-        local all_projects=""
-        all_projects="$({ $csm_cmd compose ls --all --format json | jq -r '.[]?.Name // empty' ; } 2>/dev/null || { $csm_cmd compose ls --format 'table {{.Name}}' | tail -n +2 ; } 2>/dev/null || echo "")"
+        # Add unmanaged projects (expensive — only if requested)
+        if [[ "$show_unmanaged" == true ]]; then
+            local all_projects=""
+            all_projects="$(
+                {
+                    $csm_cmd compose ls --all --format json 2>/dev/null |
+                    jq -r '.[]?.Name // empty' 2>/dev/null
+                } || {
+                    $csm_cmd compose ls --format 'table {{.Name}}' 2>/dev/null | tail -n +2
+                }
+            )" | tr '\n' ' '
 
-        # Add unmanaged projects
-        for proj in $all_projects; do
-            if [[ " ${valid_stacks[*]} " != *" $proj "* ]]; then
-                scope="local (unmanaged)"
-                status_label="unknown"
-                ports=""
-                name="$proj"
-                data+="${scope}"$'\t'"${name}"$'\t'"${status_label}"$'\t'"${ports}"$'\n'
-            fi
-        done
+            for proj in $all_projects; do
+                if [[ " ${valid_stacks[*]} " != *" $proj "* ]]; then
+                    scope="local (unmanaged)"
+                    status_label="unknown"
+                    ports=""
+                    name="$proj"
+                    data+="${scope}"$'\t'"${name}"$'\t'"${status_label}"$'\t'"${ports}"$'\n'
+                fi
+            done
+        fi
+
+        # Build header based on whether ports are displayed
+        local header="SCOPE"$'\t'"NAME"$'\t'"STATUS"
+        if [[ "$show_ports" == true ]]; then
+            header+=$'\t'"PORTS"
+        fi
 
         # Format as table
-        _format_tabular_data "SCOPE"$'\t'"NAME"$'\t'"STATUS"$'\t'"PORTS"  "printf '%s' \"$data\""
+        _format_tabular_data "$header"  "printf '%s' \"$data\""
     else
         _log WARN "No valid stacks found in $csm_dir"
     fi
@@ -1205,7 +1298,7 @@ stack_list() {
         for dir_name in "${empty_dirs[@]}"; do
             empty_data+="missing"$'\t'"${csm_dir}/${dir_name}"$'\n'
         done
-        _log WARN "Directories missing a compose file (empty or broken):"
+        _log WARN "Stack folder(s) missing a compose file:"
         _format_tabular_data "STATUS\tDIRECTORY" "printf '%s' \"$empty_data\""
     fi
 }
@@ -1213,6 +1306,8 @@ stack_list() {
 stack_ps() {
     local stack_name="${1:-}"
     _log STEP "stack_ps: listing containers ${stack_name:+ for $stack_name}"
+
+    _ensure_csm_state   # ensure csm_cmd, swarm_active etc. are populated
 
     if [[ -n "$stack_name" ]]; then
         # Per-stack ps: route based on scope
@@ -1254,7 +1349,7 @@ stack_ps() {
     # done < <("$csm_cmd" ps --all --format "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}" | sort -k2,2)
 
     # Swarm services/tasks
-    if $swarm_active; then
+    if [[ "${swarm_active:-false}" == "true" ]]; then
         local services
         services="$(_get_swarm_stacks)"
         if [[ -n "$services" ]]; then
@@ -1426,7 +1521,7 @@ ${bld}Stack Operations:${rst}
 ${bld}Information:${rst}
     g  | logs     <stack> [n]   Follow logs (default: last 50 lines)
     i  | inspect  <stack>       Inspect stack configuration
-    l  | ls | list              List all stacks with running state and scope
+    l  | ls | list [flags]     List all stacks (default: no ports, use -p/--ports to show)
     s  | status   <stack>       Show container/service status for a stack
     ps            [stack]       List all containers (formatted, colorized)
     net           [action]      Network info: host | inspect [name] | list
@@ -1443,6 +1538,10 @@ ${bld}Options:${rst}
     -a | --aliases          Print shell aliases to eval in your shell rc
     -h | --help             Show this help
     -v | --version          Show version
+
+${bld}ls flags:${rst}
+    -p | --ports              Show port mappings (requires port lookups)
+    --no-unmanaged            Skip unmanaged compose project detection
 
 ${bld}Container Stack Manager (csm.sh) version:${rst} ${mgn}${csm_version}${rst}
 EOF
@@ -1473,7 +1572,7 @@ main() {
         r|rename)           stack_rename            "$@" ;;
         bu|backup)          stack_backup            "$@" ;;
         dt|rm|delete)       stack_delete            "$@" ;;
-        ls|l|list)          stack_list                   ;;
+        ls|l|list)          stack_list                   "$@" ;;
         rc|recreate)        stack_recreate          "$@" ;;
         xx|purge)           stack_purge             "$@" ;;
 

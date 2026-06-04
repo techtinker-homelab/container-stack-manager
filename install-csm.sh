@@ -18,11 +18,11 @@ set -euo pipefail
 # GLOBAL INSTALLATION VARIABLES, SET TO "1" VIA COMMAND OPTIONS
 # =============================================================================
 
-csm_version="0.5.4"
+csm_version="0.5.5"
 
 # Install operation flags
-dry_run=0
-csm_debug=0
+dry_run="${DRY_RUN:-0}"
+csm_debug="${CSM_DEBUG:-0}"
 forced_mode=0
 remove_mode=0
 update_mode=0
@@ -1142,6 +1142,7 @@ _update_csm() {
         if [[ "$did_update" == true ]]; then
             echo ""
             _log PASS "CSM updated successfully! New version: ${mgn}${installer_version}${rst}"
+            _log INFO "Run 'hash -r' (or start a new shell) for the changes to take effect."
         else
             _log INFO "CSM update skipped."
         fi
