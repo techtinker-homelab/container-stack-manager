@@ -236,7 +236,9 @@ _detect_runtime() {
 }
 
 _detect_swarm() {
-    [[ -v swarm_active ]] && return $(( swarm_active == "true" ? 0 : 1 ))
+    if [[ -v swarm_active ]]; then
+        [[ "$swarm_active" == "true" ]] && return 0 || return 1
+    fi
 
     if [[ "${csm_cmd:-}" == "podman" ]]; then
         _log STEP "_detect_swarm: podman detected, skipping"
@@ -1224,7 +1226,7 @@ stack_list() {
             stack_dir="${csm_dir}/${dir_name}"
 
             # Determine scope
-            if [[ -f "${stack_dir}/.swarm" ]] || ($swarm_active && <<<"$swarm_stacks" grep -qw "$dir_name"); then
+            if [[ -f "${stack_dir}/.swarm" ]] || [[ "$swarm_active" == "true" ]] && grep -qw "$dir_name" <<< "$swarm_stacks"; then
                 scope="swarm"
             else
                 scope="local"
@@ -1326,7 +1328,7 @@ stack_ps() {
                 "$csm_cmd" compose -f "$file" ps
                 ;;
             swarm)
-                _detect_swarm && swarm_active=true
+                _detect_swarm
                 docker stack ps "$stack_name"
                 ;;
         esac
