@@ -46,9 +46,11 @@ set -euo pipefail
 readonly script_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 csm_debug="${CSM_DEBUG:-0}"     # set to "1" to display debug step messages
-
-csm_cmd=""    # set by _detect_runtime
-scope=""      # set by _detect_scope
+csm_cmd=""      # set by _detect_runtime
+scope=""        # set by _detect_scope
+dry_run=0       # set to 1 to show what would be done without making changes
+forced_mode=0   # set to 1 to force-apply permission fixes without prompting
+swarm_stacks="" # populated lazily by _get_swarm_stacks / _ensure_csm_state
 
 # Permission modes (symbolic form — compatible with GNU and BSD install)
 readonly mode_exec="770"   # executables:  rwxrwx---
@@ -737,6 +739,7 @@ stack_ops() {
     stack_name="${2:-}"
     file="$(_require_compose "$stack_name")"
     _detect_scope "$stack_name"
+    stack_dir="$(_get_stack_dir "$stack_name")"
 
     case "$action" in
         start|up)
