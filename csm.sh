@@ -742,6 +742,11 @@ stack_ops() {
         start|up)
             case "$scope" in
                 swarm)
+                    if [ -f "$stack_dir/.env" ]; then
+                        set -a
+                        source "$stack_dir/.env"
+                        set +a
+                    fi
                     if docker stack deploy --detach=true -c "$file" "$stack_name"; then
                         _log PASS "Swarm stack '$stack_name' started."
                     else
