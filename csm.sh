@@ -749,7 +749,12 @@ stack_ops() {
                 swarm)
                     if [ -f "$stack_dir/.env" ]; then
                         set -a
-                        source "$stack_dir/.env"
+                        while IFS= read -r line || [ -n "$line" ]; do
+                            # Ignore comments and empty lines
+                            if [[ ! "$line" =~ ^# && -n "$line" ]]; then
+                                eval "export $line"
+                            fi
+                        done < "$stacks_dir/.env"
                         set +a
                     fi
                     if docker stack deploy --detach=true -c "$file" "$stack_name"; then
