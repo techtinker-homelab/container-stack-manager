@@ -61,7 +61,11 @@ readonly mode_auth="600"   # secret files: rw-------
 # HELPER FUNCTIONS
 # =============================================================================
 
-_tput_safe() { command -v tput >/dev/null 2>&1 && tput "$@" 2>/dev/null || true; }
+_check_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+_tput_safe() { _check_command tput && tput "$@" 2>/dev/null || true; }
 
 _color_setup() {
     if [[ -n ${CSM_NO_COLOR:-} || ! -t 1 ]]; then
@@ -217,17 +221,17 @@ _detect_runtime() {
 
     _log STEP "_detect_runtime: probing container runtimes..."
 
-    if command -v podman >/dev/null 2>&1 && podman compose version >/dev/null 2>&1; then
+    if _check_command podman && podman compose version >/dev/null 2>&1; then
         declare -g csm_cmd="podman"
         _log STEP "_detect_runtime: using podman"
-    elif command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    elif _check_command docker && docker compose version >/dev/null 2>&1; then
         declare -g csm_cmd="docker"
         _log STEP "_detect_runtime: using docker"
-    elif command -v docker >/dev/null 2>&1; then
+    elif _check_command docker; then
         # Docker is present but compose subcommand may be separate plugin
         declare -g csm_cmd="docker"
         _log STEP "_detect_runtime: using docker (fallback)"
-    elif command -v podman >/dev/null 2>&1; then
+    elif _check_command podman; then
         declare -g csm_cmd="podman"
         _log STEP "_detect_runtime: using podman (fallback)"
     else
@@ -1483,9 +1487,9 @@ _print_aliases() {
 # Source this in your shell rc:  eval "\$(csm --aliases)"
 
 # Check host and container IPs
-hostip() { echo "Host IP: \$(curl -fsSL http://ifconfig.me 2>/dev/null || wget -qO- http://ifconfig.me)"; }
-lanip() { echo "Container IP: \$(${csm_cmd} container exec -it "\${1}" curl -fsSL http://ipinfo.io 2>/dev/null || wget -qO- http://ipinfo.io)"; }
-vpnip() { echo "Container IP: \$(${csm_cmd} container exec -it "\${1}" curl -fsSL http://ipinfo.io/ip 2>/dev/null || wget -qO- http://ipinfo.io/ip)" && \\
+iphost() { echo "Host IP: \$(curl -fsSL http://ifconfig.me 2>/dev/null || wget -qO- http://ifconfig.me)"; }
+iplan() { echo "Container IP: \$(${csm_cmd} container exec -it "\${1}" curl -fsSL http://ipinfo.io 2>/dev/null || wget -qO- http://ipinfo.io)"; }
+ipvpn() { echo "Container IP: \$(${csm_cmd} container exec -it "\${1}" curl -fsSL http://ipinfo.io/ip 2>/dev/null || wget -qO- http://ipinfo.io/ip)" && \\
             echo "     Host IP: \$(curl -fsSL http://ifconfig.me 2>/dev/null || wget -qO- http://ifconfig.me)"; }
 # Create encryption key
 genkey() { openssl rand -hex \${1:-32}; }
@@ -1494,7 +1498,7 @@ wtup() {
     $csm_cmd run --rm --name "\$1-update" -v /var/run/$csm_cmd.sock:/var/run/$csm_cmd.sock ghcr.io/nicholas-fedor/watchtower --run-once "\$1";
 }
 # cd into stacks directory or a specific stack
-alias cds='cd ${csm_dir}'
+alias cds='cd ${csm_dir}/'
 ALIAS
 }
 

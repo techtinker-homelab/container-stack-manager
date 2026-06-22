@@ -43,21 +43,6 @@ else
 fi
 
 # =============================================================================
-# PRIVILEGE CHECK
-# =============================================================================
-
-if [[ "$(id -u)" -eq 0 ]]; then
-    var_sudo=""
-    running_as_root=true
-elif command -v sudo >/dev/null 2>&1; then
-    var_sudo="sudo"
-    running_as_root=false
-else
-    printf "This installer requires root or sudo. Neither is available."
-    exit 1
-fi
-
-# =============================================================================
 # REQUIRED SETUP VARIABLE VALUES
 # =============================================================================
 
@@ -129,10 +114,29 @@ var_defaults() {
 }
 
 # =============================================================================
+# PRIVILEGE CHECK
+# =============================================================================
+
+_check_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+if [[ "$(id -u)" -eq 0 ]]; then
+    var_sudo=""
+    running_as_root=true
+elif _check_command sudo; then
+    var_sudo="sudo"
+    running_as_root=false
+else
+    printf "This installer requires root or sudo. Neither is available."
+    exit 1
+fi
+
+# =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
 
-_tput_safe() { command -v tput >/dev/null 2>&1 && tput "$@" 2>/dev/null || true; }
+_tput_safe() { _check_command tput && tput "$@" 2>/dev/null || true; }
 
 _color_setup() {
     if [[ -n ${CSM_NO_COLOR:-} || ! -t 1 ]]; then
@@ -457,12 +461,12 @@ _user_input() {
 # =============================================================================
 
 _detect_pkg_manager() {
-    if   command -v nala     >/dev/null 2>&1; then pkg_mgr="nala"
-    elif command -v apt-get  >/dev/null 2>&1; then pkg_mgr="apt-get"
-    elif command -v dnf      >/dev/null 2>&1; then pkg_mgr="dnf"
-    elif command -v yum      >/dev/null 2>&1; then pkg_mgr="yum"
-    elif command -v pacman   >/dev/null 2>&1; then pkg_mgr="pacman"
-    elif command -v slackpkg >/dev/null 2>&1; then pkg_mgr="slackpkg"
+    if   _check_cmd nala; then pkg_mgr="nala"
+    elif _check_cmd apt-get; then pkg_mgr="apt-get"
+    elif _check_cmd dnf; then pkg_mgr="dnf"
+    elif _check_cmd yum; then pkg_mgr="yum"
+    elif _check_cmd pacman; then pkg_mgr="pacman"
+    elif _check_cmd slackpkg; then pkg_mgr="slackpkg"
     else
         _log WARN "Unsupported package manager - install curl, git manually if needed."
         pkg_mgr=""
@@ -540,11 +544,11 @@ _detect_group() {
 }
 
 _detect_runtime() {
-    if command -v docker >/dev/null 2>&1; then
+    if _check_cmd docker; then
         _log STEP "Docker found: $(docker --version)"
         csm_runtime="docker"
         csm_group="docker"
-    elif command -v podman >/dev/null 2>&1; then
+    elif _check_cmd podman; then
         _log STEP "Podman found: $(podman --version)"
         csm_runtime="podman"
         csm_group="podman"
