@@ -168,13 +168,9 @@ _log() {
     prefix=""
     ts=""
 
-    if [[ "${dry_run:-0}" == "1" ]]; then
-        prefix="[DRY-RUN] "
-    fi
+    if [[ "${dry_run:-0}" == "1" ]]; then prefix="[DRY-RUN] "; fi
 
-    if [[ "${csm_debug:-0}" == "1" ]]; then
-        printf -v ts '[%(%Y-%m-%d %H:%M:%S)T] ' -1
-    fi
+    if [[ "${csm_debug:-0}" == "1" ]]; then printf -v ts '[%(%Y-%m-%d %H:%M:%S)T] ' -1; fi
 
     case "$level" in
         EXIT|FAIL)  color="${red}" ;;
@@ -204,26 +200,36 @@ _detect_os() {
     fi
 }
 
-_confirm_yes() {
-    local prompt reply
-    prompt="${1:-Are you sure?}"
-    [[ "${forced_mode:-0}" == "1" ]] && { _log INFO "${prompt} ${suffix} [auto-yes]"; return 0; }
-    read -r -p "$(printf " %s%s?%s >> %s [Y/n]: " "${ylw}" "${bld}" "${rst}" "${prompt}")" reply
-    case "${reply,,}" in
-        y|yes|"") return 0 ;;
-        *)        return 1 ;;
+_confirm() {
+    local prompt="${1:-Are you sure?}"
+    local default="${2:-yes}"
+    local reply=""
+    local suffix=""
+    local forced="${forced_mode:-${FORCE:-0}}"
+
+    case "${default,,}" in
+        y|yes)  suffix="[Y/n]"; [[ "$forced" == "1" ]] && { _log INFO "${prompt} ${suffix} [auto-yes]"; return 0; } ;;
+        n|no)   suffix="[y/N]"; [[ "$forced" == "1" ]] && { _log INFO "${prompt} ${suffix} [auto-no]"; return 1; } ;;
+        *)      _die "_confirm: default must be 'yes' or 'no' (got: ${default})" ;;
     esac
+
+    while true; do
+        read -r -p "$(printf " %s%s?%s >> %s %s: " "${ylw}" "${bld}" "${rst}" "${prompt}" "${suffix}")" reply
+        case "${reply,,}" in
+            y|yes)  return 0 ;;
+            n|no)   return 1 ;;
+            "")     [[ "${default,,}" =~ ^(y|yes)$ ]] && return 0 || return 1 ;;
+            *)      _log WARN "Please answer yes/y or no/n." ;;
+        esac
+    done
+}
+
+_confirm_yes() {
+    _confirm "${1:-Are you sure? \[Y/n\]}" yes
 }
 
 _confirm_no() {
-    local prompt reply
-    prompt="${1:-Are you sure?}"
-    [[ "${forced_mode:-0}" == "1" ]] && { _log INFO "${prompt} ${suffix} [auto-no]"; return 1; }
-    read -r -p "$(printf " %s%s?%s >> %s [y/N]: " "${ylw}" "${bld}" "${rst}" "${prompt}")" reply
-    case "${reply,,}" in
-        y|yes) return 0 ;;
-        *)     return 1 ;;
-    esac
+    _confirm "${1:-Are you sure? \[y/N\]}" no
 }
 
 _sanitize_input() {
