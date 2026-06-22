@@ -205,21 +205,25 @@ _detect_os() {
 }
 
 _confirm_yes() {
-    if [[ "$forced_mode" == 1 ]]; then return 0; fi
-    local prompt="${1:-Are you sure?}"
-    read -r -p " ${prompt} [Y/n]: " reply
+    local prompt reply
+    prompt="${1:-Are you sure?}"
+    [[ "${forced_mode:-0}" == "1" ]] && { _log INFO "${prompt} ${suffix} [auto-yes]"; return 0; }
+    read -r -p "$(printf " %s%s?%s >> %s [Y/n]: " "${ylw}" "${bld}" "${rst}" "${prompt}")" reply
     case "${reply,,}" in
         y|yes|"") return 0 ;;
-        *) return 1 ;;
+        *)        return 1 ;;
     esac
 }
 
 _confirm_no() {
-    if [[ "$forced_mode" == 1 ]]; then return 0; fi
-    local prompt="${1:-Are you sure?}"
-    read -r -p "${ylw}${bld} ${prompt} [y/N]: ${rst}" reply
-    if [[ "${reply,,}" == "y" ]]; then return 0; fi
-    return 1
+    local prompt reply
+    prompt="${1:-Are you sure?}"
+    [[ "${forced_mode:-0}" == "1" ]] && { _log INFO "${prompt} ${suffix} [auto-no]"; return 1; }
+    read -r -p "$(printf " %s%s?%s >> %s [y/N]: " "${ylw}" "${bld}" "${rst}" "${prompt}")" reply
+    case "${reply,,}" in
+        y|yes) return 0 ;;
+        *)     return 1 ;;
+    esac
 }
 
 _sanitize_input() {
