@@ -158,26 +158,40 @@ _color_setup() {
 }
 
 _log() {
-    local level="${1:-INFO}" message="${2:-}"
-    local color
-    local prefix=""
+    local level message original_level color prefix ts
+    level="${1:-INFO}"
+    shift || true
+    original_level="$level"
+    level="${level^^}"
+    message="${*:-}"
+    color=""
+    prefix=""
+    ts=""
 
-    # Add DRY-RUN prefix if in dry-run mode
-    if [[ "${dry_run:-0}" == "1" ]]; then prefix="[DRY-RUN] "; fi
+    if [[ "${dry_run:-0}" == "1" ]]; then
+        prefix="[DRY-RUN] "
+    fi
+
+    if [[ "${csm_debug:-0}" == "1" ]]; then
+        printf -v ts '[%(%Y-%m-%d %H:%M:%S)T] ' -1
+    fi
 
     case "$level" in
         EXIT|FAIL)  color="${red}" ;;
         INFO)       color="${cyn}" ;;
         PASS)       color="${grn}" ;;
-        STEP)       color="${mgn}"; if [[ "${csm_debug:-0}" == "0" ]]; then return 0; fi ;;
+        STEP)       color="${mgn}"; [[ "${csm_debug:-0}" == "0" ]] && return 0 ;;
         WARN)       color="${ylw}" ;;
-        *)          color="${ylw}"; level="WARN"
-                    message="[Unknown log type: '${level}'] $message"
+        *)          color="${ylw}"
+                    message="[Unknown log type: '${original_level}'] ${message}"
+                    level="WARN"
                     ;;
     esac
-    printf " %s%s%-4s >> %s%s%s %s%s<<%s\n" \
-        "${color}" "${bld}" "${level}" "${prefix}" "${rst}" "${message}" "${color}" "${bld}" "${rst}" >&2
-    if [[ "$level" == "EXIT" ]]; then exit 1; fi
+
+    printf " %s%s%-4s >> %s%s%s%s %s%s<<%s\n" \
+        "${color}" "${bld}" "${level}" "${prefix}" "${rst}" "${ts}" "${message}" "${color}" "${bld}" "${rst}" >&2
+
+    [[ "$level" == "EXIT" ]] && exit 1
 }
 
 _die() { _log FAIL "$1"; exit 1; }
