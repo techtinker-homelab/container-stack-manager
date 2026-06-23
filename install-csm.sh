@@ -184,10 +184,10 @@ _log() {
                     ;;
     esac
 
-    printf " %s%s%-4s >> %s%s%s%s %s%s<<%s\n" \
-        "${color}" "${bld}" "${level}" "${prefix}" "${rst}" "${ts}" "${message}" "${color}" "${bld}" "${rst}" >&2
+    printf " %s%s%s%-4s >> %s%s%s %s%s<<%s\n" \
+        "${color}" "${bld}" "${prefix}" "${level}" "${rst}" "${ts}" "${message}" "${color}" "${bld}" "${rst}" >&2
 
-    [[ "$level" == "EXIT" ]] && exit 1
+    [[ "$level" == "EXIT" ]] && exit 1 || return 0
 }
 
 _die() { _log FAIL "$1"; exit 1; }
