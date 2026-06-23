@@ -124,7 +124,7 @@ _check_cmd() {
 if [[ "$(id -u)" -eq 0 ]]; then
     var_sudo=""
     running_as_root=true
-elif _check_command sudo; then
+elif _check_cmd sudo; then
     var_sudo="sudo"
     running_as_root=false
 else
@@ -136,7 +136,7 @@ fi
 # HELPER FUNCTIONS
 # =============================================================================
 
-_tput_safe() { _check_command tput && tput "$@" 2>/dev/null || true; }
+_tput_safe() { _check_cmd tput && tput "$@" 2>/dev/null || true; }
 
 _color_setup() {
     if [[ -n ${CSM_NO_COLOR:-} || ! -t 1 ]]; then
