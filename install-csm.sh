@@ -214,7 +214,7 @@ _confirm() {
     esac
 
     while true; do
-        read -r -p "$(printf " %s%s?%s >> %s %s: " "${ylw}" "${bld}" "${rst}" "${prompt}" "${suffix}")" reply
+        read -r -p "$(printf " %s%s???? >>%s %s %s: " "${ylw}" "${bld}" "${rst}" "${prompt}" "${suffix}")" reply
         case "${reply,,}" in
             y|yes)  return 0 ;;
             n|no)   return 1 ;;
@@ -477,7 +477,6 @@ _user_input() {
     for var in "${csm_var_order[@]}"; do
         echo "${var}=${!var}" >> "$user_conf"
     done
-    echo
 }
 
 # =============================================================================
@@ -1333,7 +1332,6 @@ main() {
     else
         _install_csm
     fi
-    echo ""
     trap 'flock -u 200; exec 200>&-; exit' EXIT
 }
 
