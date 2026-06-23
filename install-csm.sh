@@ -834,14 +834,14 @@ _install_dir() {
 
 _install_file() {
     local src="${1:-}" dest="${2:-}" mode="${3:-}" flag="${4:-}"
-    local filename=$(basename "$src")
+    local tgt=$(basename "$src")
     if [[ "${forced_mode}" == 1 ]]; then flag="--force"; fi
 
     if [[ "$dry_run" == 1 ]]; then
-        _log INFO "Would create directory '$tgt' (mode=$mode)"
+        _log INFO "Would create file '$tgt' (mode=$mode)"
     else
         if [[ -f "$src" ]]; then
-            _log STEP "_install_file: installing $filename (mode=$mode)"
+            _log STEP "_install_file: installing $tgt (mode=$mode)"
             case "$flag" in
                 -f | --force)
                     # Overwrite target file, "-p" (preserve timestamps)
@@ -851,7 +851,7 @@ _install_file() {
                     # Only copy if changed, "-C"
                     $var_sudo install -o "$csm_uid" -g "$csm_gid" -m "$mode" -C "$src" "$dest/"
             esac
-            _log STEP "Installed: $filename → $dest"
+            _log STEP "Installed: $tgt → $dest"
         else
             _log WARN "Source file missing: $src"
         fi
