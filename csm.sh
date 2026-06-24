@@ -1498,7 +1498,7 @@ wtup() {
     $csm_cmd run --rm --name "\$1-update" -v /var/run/$csm_cmd.sock:/var/run/$csm_cmd.sock ghcr.io/nicholas-fedor/watchtower --run-once "\$1";
 }
 # cd into stacks directory or a specific stack
-alias cds='cd ${csm_dir}/'
+function cds { cd "${csm_dir}${1:+/$1}"; }ss
 ALIAS
 }
 
